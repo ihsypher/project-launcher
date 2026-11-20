@@ -533,8 +533,8 @@ enum AX {
 
 @MainActor
 enum WindowCloser {
-    /// Seconds after the first try to look again. Apps can ignore a press while busy,
-    /// and closing one Preview tab brings the next one forward as a new window.
+    /// Seconds after the first try to look again, for windows that appear as others close
+    /// (closing one Preview tab brings the next one forward).
     private static let retryDelays: [Double] = [0.7, 1.5, 3]
 
     static func close(files: [String]) {
@@ -556,16 +556,27 @@ enum WindowCloser {
         }
     }
 
-    /// Every file that had a visible window at any point during one close.
+    /// What happened during one close: which windows were pressed (and showing which file),
+    /// and every file that had a visible window at any point.
     private final class Seen {
+        var pressed: [(window: AXUIElement, path: String)] = []
         var paths: Set<String> = []
+
+        func wasPressed(_ window: AXUIElement, _ path: String) -> Bool {
+            pressed.contains { CFEqual($0.window, window) && $0.path == path }
+        }
     }
 
     /// Presses close on each matching window, leaving alone any that are asking to save.
+    /// A window still showing the same file is only pressed once: Word can take a few seconds
+    /// to close a OneDrive file, and pressing again mid-close brings it back.
+    /// (A Preview window that has moved on to its next tab shows a different file, so it's pressed.)
     private static func pressAll(_ files: [String], _ seen: Seen) {
         for item in AX.documentWindows(files: files) {
             seen.paths.insert(item.path)
-            if !AX.hasSheet(item.window) { AX.pressClose(item.window) }
+            if AX.hasSheet(item.window) || seen.wasPressed(item.window, item.path) { continue }
+            AX.pressClose(item.window)
+            seen.pressed.append((item.window, item.path))
         }
     }
 
