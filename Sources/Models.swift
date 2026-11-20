@@ -77,10 +77,12 @@ struct Project: Codable, Identifiable, Hashable {
     var timeLog: [WorkSession] = []
     /// Set while the project is open.
     var activeSession: ActiveSession? = nil
+    /// Finished with: hidden from the menu and Raycast, but its time still counts.
+    var archived: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case id, name, groupID, files, urls, braveWindowNames, icon, color, hideAppsOnClose, quitAppsOnClose, claudeLink, claudeOnClose
-        case deadline, layouts, timeLog, activeSession
+        case deadline, layouts, timeLog, activeSession, archived
         case legacyParentID = "parentID"
     }
 }
@@ -115,6 +117,7 @@ extension Project {
         layouts = try c.decodeIfPresent([String: [SavedFrame]].self, forKey: .layouts) ?? [:]
         timeLog = try c.decodeIfPresent([WorkSession].self, forKey: .timeLog) ?? []
         activeSession = try c.decodeIfPresent(ActiveSession.self, forKey: .activeSession)
+        archived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
     }
 
     /// Whether the project has anything to open.
@@ -167,6 +170,8 @@ final class ProjectStore: ObservableObject {
         fileURL = support.appendingPathComponent("projects.json")
         load()
         finishStaleSessions()
+        RaycastScripts.sync(projects: projects, groups: groups)
+        URLEvents.shared.handler = { [weak self] url in self?.handle(url) }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.heartbeat() }
         }
@@ -193,7 +198,16 @@ final class ProjectStore: ObservableObject {
         if isOpen(current) { close(current) } else { open(current) }
     }
 
-    func open(_ p: Project) {
+    /// Settings key: opening a project closes the others first (hold Option to keep them).
+    static let closeOthersKey = "closeOthersOnOpen"
+
+    func open(_ p: Project, keepOthers: Bool = NSEvent.modifierFlags.contains(.option)) {
+        let closeOthers = UserDefaults.standard.object(forKey: Self.closeOthersKey) as? Bool ?? true
+        if closeOthers && !keepOthers {
+            for other in projects where other.id != p.id && isOpen(other) {
+                close(other, keepingFor: p)
+            }
+        }
         problems[p.id] = nil
         Launcher.open(p, stillOpen: { [weak self] in self?.openIDs.contains(p.id) ?? false })
         openIDs.insert(p.id)
@@ -202,9 +216,12 @@ final class ProjectStore: ObservableObject {
         scheduleCheck(p.id, opened: true)
     }
 
-    func close(_ p: Project) {
+    /// `next`: the project about to open instead, whose apps, files and windows are left alone.
+    func close(_ p: Project, keepingFor next: Project? = nil) {
         problems[p.id] = nil
-        Launcher.close(p, keepRunning: appsInUse(except: p.id))
+        var keep = appsInUse(except: p.id)
+        if let next { keep.formUnion(apps(of: next)) }
+        Launcher.close(p, keepRunning: keep, keeping: next)
         openIDs.remove(p.id)
         endSession(p.id)
         scheduleCheck(p.id, opened: false)
@@ -213,13 +230,45 @@ final class ProjectStore: ObservableObject {
     /// Apps another open project still uses (its files' apps, and Claude if it has a chat),
     /// which closing shouldn't quit or hide.
     private func appsInUse(except id: UUID) -> Set<String> {
-        let others = projects.filter { $0.id != id && isOpen($0) }
-        var apps = Set(others.flatMap { $0.files.compactMap(appBundleID) })
-        if let claude = ClaudeApp.bundleID(),
-           others.contains(where: { !$0.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty }) {
+        Set(projects.filter { $0.id != id && isOpen($0) }.flatMap(apps(of:)))
+    }
+
+    /// The apps a project uses: its files' apps, and Claude if it has a chat.
+    private func apps(of p: Project) -> Set<String> {
+        var apps = Set(p.files.compactMap(appBundleID))
+        if let claude = ClaudeApp.bundleID(), !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty {
             apps.insert(claude)
         }
         return apps
+    }
+
+    // MARK: Archive
+
+    /// Archiving closes the project if it's open.
+    func setArchived(_ id: UUID, _ archived: Bool) {
+        if archived, let p = projects.first(where: { $0.id == id }), isOpen(p) { close(p) }
+        update(id) { $0.archived = archived }
+    }
+
+    // MARK: Links (projectlauncher://toggle?id=..., also open, close, closeall; or ?name=...)
+
+    func handle(_ url: URL) {
+        guard url.scheme == "projectlauncher" else { return }
+        let action = url.host ?? ""
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let id = items.first { $0.name == "id" }?.value.flatMap(UUID.init(uuidString:))
+        let name = items.first { $0.name == "name" }?.value?.lowercased()
+        Log.write("LINK \(url.absoluteString)")
+        if action == "closeall" { closeAll(); return }
+        let target = projects.first { $0.id == id }
+            ?? projects.first { !$0.archived && $0.name.lowercased() == name }
+            ?? name.flatMap { n in projects.first { !$0.archived && $0.name.lowercased().contains(n) } }
+        guard let p = target else { return }
+        switch action {
+        case "open": if !isOpen(p) { open(p, keepOthers: false) }
+        case "close": if isOpen(p) { close(p) }
+        default: if isOpen(p) { close(p) } else { open(p, keepOthers: false) }
+        }
     }
 
     // MARK: Checking it worked
@@ -398,6 +447,14 @@ final class ProjectStore: ObservableObject {
 
     // MARK: Groups
 
+    /// Projects in a group (or ungrouped) that aren't archived, for the menu and sidebar.
+    func activeProjects(in groupID: UUID?) -> [Project] {
+        projects(in: groupID).filter { !$0.archived }
+    }
+
+    var archivedProjects: [Project] { projects.filter(\.archived) }
+
+    /// All projects in a group (or ungrouped), archived ones included.
     func projects(in groupID: UUID?) -> [Project] {
         let ids = Set(groups.map(\.id))
         return projects.filter { p in
@@ -511,6 +568,7 @@ final class ProjectStore: ObservableObject {
         if let data = try? encoder.encode(projects) {
             try? data.write(to: fileURL, options: .atomic)
         }
+        RaycastScripts.sync(projects: projects, groups: groups)
     }
 
     private func saveGroups() {
@@ -519,6 +577,7 @@ final class ProjectStore: ObservableObject {
         if let data = try? encoder.encode(groups) {
             try? data.write(to: groupsURL, options: .atomic)
         }
+        RaycastScripts.sync(projects: projects, groups: groups)
     }
 }
 

@@ -3,6 +3,7 @@ import AppKit
 
 @main
 struct LauncherApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = ProjectStore()
 
     init() {
@@ -49,10 +50,10 @@ struct MenuContent: View {
 
         // Each project is a toggle: a tick means it's open. Click to open/close.
         // Groups are submenus of their projects.
-        ForEach(store.projects(in: nil)) { project in
+        ForEach(store.activeProjects(in: nil)) { project in
             ProjectToggle(project: project)
         }
-        ForEach(store.groups) { group in
+        ForEach(store.groups.filter { !store.activeProjects(in: $0.id).isEmpty }) { group in
             GroupMenu(group: group)
         }
 
@@ -140,7 +141,7 @@ struct GroupMenu: View {
     let group: ProjectGroup
 
     var body: some View {
-        let members = store.projects(in: group.id)
+        let members = store.activeProjects(in: group.id)
         Menu {
             if members.isEmpty { Text("No projects in this group") }
             ForEach(members) { ProjectToggle(project: $0) }

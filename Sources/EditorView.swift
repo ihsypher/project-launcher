@@ -10,17 +10,25 @@ struct EditorView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $store.editorSelection) {
-                ForEach(store.projects(in: nil)) { p in
+                ForEach(store.activeProjects(in: nil)) { p in
                     projectRow(p)
                 }
                 .onMove { store.moveProjects(in: nil, from: $0, to: $1) }
 
                 ForEach(store.groups) { g in
                     groupRow(g)
-                    ForEach(store.projects(in: g.id)) { p in
+                    ForEach(store.activeProjects(in: g.id)) { p in
                         projectRow(p)
                     }
                     .onMove { store.moveProjects(in: g.id, from: $0, to: $1) }
+                }
+
+                if !store.archivedProjects.isEmpty {
+                    Section("Archived") {
+                        ForEach(store.archivedProjects) { p in
+                            projectRow(p).opacity(0.6)
+                        }
+                    }
                 }
             }
             .onDeleteCommand { pendingDelete = store.editorSelection }
@@ -66,7 +74,7 @@ struct EditorView: View {
             }
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView()
+            SettingsView().environmentObject(store)
         }
         .confirmationDialog(deleteTitle, isPresented: Binding(
             get: { pendingDelete != nil },
@@ -94,7 +102,7 @@ struct EditorView: View {
             }
         }
         .padding(.vertical, 1)
-        .padding(.leading, p.groupID == nil ? 0 : 14)
+        .padding(.leading, p.groupID == nil || p.archived ? 0 : 14)
         .tag(p.id)
         .contextMenu {
             Button(store.isOpen(p) ? "Close Project" : "Open Project") { store.toggle(p) }
@@ -115,6 +123,7 @@ struct EditorView: View {
                 }
             }
             Divider()
+            Button(p.archived ? "Unarchive" : "Archive") { store.setArchived(p.id, !p.archived) }
             Button("Delete Project...", role: .destructive) { pendingDelete = p.id }
         }
     }
@@ -207,7 +216,7 @@ struct EditorView: View {
 extension ProjectStore {
     /// Reorders the projects shown in one part of the sidebar (a group, or ungrouped).
     func moveProjects(in groupID: UUID?, from source: IndexSet, to destination: Int) {
-        var subset = projects(in: groupID)
+        var subset = activeProjects(in: groupID)
         subset.move(fromOffsets: source, toOffset: destination)
         let ids = Set(subset.map(\.id))
         var next = subset.makeIterator()
@@ -233,7 +242,9 @@ extension ProjectStore {
 
     /// Everything in the sidebar, top to bottom.
     func sidebarOrder() -> [UUID] {
-        projects(in: nil).map(\.id) + groups.flatMap { [$0.id] + projects(in: $0.id).map(\.id) }
+        activeProjects(in: nil).map(\.id)
+            + groups.flatMap { [$0.id] + activeProjects(in: $0.id).map(\.id) }
+            + archivedProjects.map(\.id)
     }
 }
 
@@ -272,6 +283,9 @@ struct GroupDetail: View {
                     HStack(spacing: 8) {
                         ProjectIcon(icon: p.icon, color: p.color, size: 18)
                         Text(p.name)
+                        if p.archived {
+                            Text("archived").font(.caption).foregroundStyle(.secondary)
+                        }
                         Spacer()
                         Text(formatDuration(p.timeSpent())).foregroundStyle(.secondary)
                     }
@@ -302,10 +316,50 @@ struct GroupDetail: View {
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(ProjectStore.closeOthersKey) private var closeOthers = true
+    @AppStorage(RaycastScripts.enabledKey) private var raycast = true
+    @EnvironmentObject var store: ProjectStore
+    @State private var openAtLogin = LoginItem.isEnabled
 
     var body: some View {
         VStack(spacing: 0) {
             Form {
+                Section {
+                    Toggle("Close other projects when opening one", isOn: $closeOthers)
+                    Toggle("Open Project Launcher at login", isOn: Binding(
+                        get: { openAtLogin },
+                        set: { LoginItem.set($0); openAtLogin = LoginItem.isEnabled }
+                    ))
+                } header: {
+                    Label("General", systemImage: "gearshape")
+                } footer: {
+                    Text("Each project starts fresh. Hold Option while opening a project to keep the others open. Anything both projects use (an app, file or Brave window) is left alone.")
+                }
+
+                Section {
+                    Toggle("Raycast commands", isOn: Binding(
+                        get: { raycast },
+                        set: { raycast = $0; RaycastScripts.sync(projects: store.projects, groups: store.groups) }
+                    ))
+                    if raycast {
+                        HStack {
+                            Button("Show Folder") {
+                                RaycastScripts.sync(projects: store.projects, groups: store.groups)
+                                NSWorkspace.shared.activateFileViewerSelecting([RaycastScripts.folder])
+                            }
+                            Button("Copy Folder Path") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(RaycastScripts.folder.path, forType: .string)
+                            }
+                            Spacer()
+                        }
+                    }
+                } header: {
+                    Label("Raycast", systemImage: "magnifyingglass")
+                } footer: {
+                    Text("Makes a Raycast command for each project, so you can search for it and open or close it. One-time setup: in Raycast, Settings > Extensions > + > Add Script Directory, and choose this folder (press Cmd-Shift-G and paste the copied path).")
+                }
+
                 Section {
                     HStack {
                         Button("Show Log") {
@@ -331,7 +385,7 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 440, height: 300)
+        .frame(width: 500, height: 560)
     }
 }
 
@@ -380,6 +434,11 @@ struct ProjectDetail: View {
                         Text(g.name).tag(UUID?.some(g.id))
                     }
                 }
+                Toggle("Archived", isOn: Binding(
+                    get: { project.archived },
+                    set: { store.setArchived(project.id, $0) }
+                ))
+                .help("Finished with it: hidden from the menu and Raycast, but its time still counts")
                 Toggle("Deadline", isOn: hasDeadline)
                 if project.deadline != nil {
                     DatePicker("Due", selection: deadlineDate, displayedComponents: [.date, .hourAndMinute])
@@ -399,6 +458,9 @@ struct ProjectDetail: View {
                         Text((path as NSString).lastPathComponent)
                         if !FileManager.default.fileExists(atPath: expandPath(path)) {
                             Text("missing").font(.caption).foregroundStyle(.red)
+                            Button("Find...") { relink(path) }
+                                .controlSize(.small)
+                                .help("Find where this file has moved to")
                         }
                         Spacer()
                         if isApp(path) || closesWholeApp(path) {
@@ -590,6 +652,7 @@ struct ProjectDetail: View {
     private var subtitle: String {
         var parts: [String] = []
         if let g = store.group(of: project) { parts.append(g.name) }
+        if project.archived { parts.append("Archived") }
         if store.projects.first(where: { $0.id == project.id }).map(store.isOpen) == true {
             parts.append("Open now")
         }
@@ -687,6 +750,50 @@ struct ProjectDetail: View {
         for url in panel.urls {
             let path = (url.path as NSString).abbreviatingWithTildeInPath
             if !project.files.contains(path) { project.files.append(path) }
+        }
+    }
+
+    /// A file that's been moved or renamed: look for one with the same name (Spotlight),
+    /// otherwise let the user pick it. Its settings and saved positions move with it.
+    private func relink(_ old: String) {
+        let name = (old as NSString).lastPathComponent
+        var found: String?
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
+        task.arguments = ["-onlyin", NSHomeDirectory(), "-name", name]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        if (try? task.run()) != nil {
+            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            task.waitUntilExit()
+            let matches = out.split(separator: "\n").map(String.init)
+                .filter { ($0 as NSString).lastPathComponent == name && !$0.contains("/.Trash/") }
+            if matches.count == 1,
+               Alerts.confirm("Found \(name)", "Use this file?\n\n\((matches[0] as NSString).abbreviatingWithTildeInPath)", ok: "Use It") {
+                found = matches[0]
+            }
+        }
+        if found == nil {
+            let panel = NSOpenPanel()
+            panel.message = "Where is \(name) now?"
+            panel.prompt = "Use"
+            var dir = URL(fileURLWithPath: expandPath(old)).deletingLastPathComponent()
+            while !FileManager.default.fileExists(atPath: dir.path) && dir.path != "/" { dir.deleteLastPathComponent() }
+            panel.directoryURL = dir
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            found = url.path
+        }
+        guard let newPath = found.map({ ($0 as NSString).abbreviatingWithTildeInPath }), newPath != old else { return }
+        func swap(_ list: inout [String]) { list = list.map { $0 == old ? newPath : $0 } }
+        swap(&project.files)
+        swap(&project.hideAppsOnClose)
+        swap(&project.quitAppsOnClose)
+        for key in project.layouts.keys {
+            project.layouts[key] = project.layouts[key]?.map { f in
+                var f = f
+                if f.kind == "file" && f.key == old { f.key = newPath }
+                return f
+            }
         }
     }
 

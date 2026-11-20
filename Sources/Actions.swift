@@ -37,11 +37,13 @@ enum Launcher {
     }
 
     /// `keepRunning`: bundle IDs of apps another open project still uses.
-    static func close(_ p: Project, keepRunning: Set<String> = []) {
-        Log.write("CLOSE \(p.name): files=\(p.files)")
+    /// `next`: a project opening straight after, whose files and Brave windows stay open.
+    static func close(_ p: Project, keepRunning: Set<String> = [], keeping next: Project? = nil) {
+        Log.write("CLOSE \(p.name): files=\(p.files)" + (next.map { " (switching to \($0.name))" } ?? ""))
         // Close ONLY this project's document windows. Apps stay running,
         // so other modules' files in Word/Excel/Preview are untouched.
-        let docs = p.files.filter { wholeAppBundleID($0) == nil }
+        let shared = Set((next?.files ?? []).map(expandPath))
+        let docs = p.files.filter { wholeAppBundleID($0) == nil && !shared.contains(expandPath($0)) }
         if !docs.isEmpty {
             WindowCloser.close(files: docs)
         }
@@ -88,7 +90,8 @@ enum Launcher {
             }
         }
         // Minimise (not close) the named Brave windows.
-        for name in p.braveWindowNames.map({ $0.trimmingCharacters(in: .whitespaces) }) where !name.isEmpty {
+        for name in p.braveWindowNames.map({ $0.trimmingCharacters(in: .whitespaces) })
+        where !name.isEmpty && next?.braveWindowNames.contains(name) != true {
             Brave.minimise(windowName: name)
         }
     }

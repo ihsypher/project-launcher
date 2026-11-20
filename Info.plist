@@ -15,13 +15,24 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.14</string>
+    <string>1.15</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>local.ihsaan.projectlauncher</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>projectlauncher</string>
+            </array>
+        </dict>
+    </array>
     <key>NSAppleEventsUsageDescription</key>
     <string>Project Launcher controls Brave, Word, Excel and PowerPoint so it can find, arrange and minimise your project windows.</string>
 </dict>
