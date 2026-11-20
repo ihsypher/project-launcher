@@ -584,7 +584,7 @@ struct ProjectDetail: View {
         }
     }
 
-    /// e.g. "Radiation · Open · 1h 20m today · 3 days left"
+    /// e.g. "Radiation · Open · 1h 20m today · due in 3 days"
     private var subtitle: String {
         var parts: [String] = []
         if let g = store.group(of: project) { parts.append(g.name) }

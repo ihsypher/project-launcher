@@ -122,7 +122,7 @@ struct ProjectToggle: View {
         }
     }
 
-    /// e.g. "ANIHC  (3 days left, 1h 20m today)"
+    /// e.g. "ANIHC  (due in 3 days, 1h 20m today)"
     private var label: String {
         var extras: [String] = []
         if let d = project.deadline { extras.append(deadlineText(d)) }
@@ -149,7 +149,7 @@ struct GroupMenu: View {
         }
     }
 
-    /// e.g. "Radiation  (1 open, 2h 10m today, next: 3 days left)"
+    /// e.g. "Radiation  (1 open, 2h 10m today, next due in 3 days)"
     private func label(_ members: [Project]) -> String {
         var extras: [String] = []
         let open = members.filter { store.isOpen($0) }.count
@@ -158,7 +158,7 @@ struct GroupMenu: View {
         let today = store.groupTime(group.id, since: startOfDay)
         if today >= 60 { extras.append("\(formatDuration(today)) today") }
         if let next = members.compactMap(\.deadline).filter({ $0 >= startOfDay }).min() {
-            extras.append("next: \(deadlineText(next))")
+            extras.append("next \(deadlineText(next))")
         }
         return extras.isEmpty ? group.name : "\(group.name)  (\(extras.joined(separator: ", ")))"
     }

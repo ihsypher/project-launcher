@@ -195,7 +195,7 @@ final class ProjectStore: ObservableObject {
 
     func open(_ p: Project) {
         problems[p.id] = nil
-        Launcher.open(p)
+        Launcher.open(p, stillOpen: { [weak self] in self?.openIDs.contains(p.id) ?? false })
         openIDs.insert(p.id)
         let now = Date()
         update(p.id) { $0.activeSession = ActiveSession(start: now, lastBeat: now) }
@@ -210,9 +210,16 @@ final class ProjectStore: ObservableObject {
         scheduleCheck(p.id, opened: false)
     }
 
-    /// Apps another open project still uses (its files' apps), which closing shouldn't quit.
+    /// Apps another open project still uses (its files' apps, and Claude if it has a chat),
+    /// which closing shouldn't quit or hide.
     private func appsInUse(except id: UUID) -> Set<String> {
-        Set(projects.filter { $0.id != id && isOpen($0) }.flatMap { $0.files.compactMap(appBundleID) })
+        let others = projects.filter { $0.id != id && isOpen($0) }
+        var apps = Set(others.flatMap { $0.files.compactMap(appBundleID) })
+        if let claude = ClaudeApp.bundleID(),
+           others.contains(where: { !$0.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty }) {
+            apps.insert(claude)
+        }
+        return apps
     }
 
     // MARK: Checking it worked
@@ -236,7 +243,9 @@ final class ProjectStore: ObservableObject {
         guard let p = projects.first(where: { $0.id == id }), let problem = problems[id] else { return }
         problems[id] = nil
         Log.write("TRY AGAIN \(problem.opened ? "open" : "close") \(p.name)")
-        if problem.opened { Launcher.open(p) } else { Launcher.close(p, keepRunning: appsInUse(except: id)) }
+        if problem.opened {
+            Launcher.open(p, stillOpen: { [weak self] in self?.openIDs.contains(id) ?? false })
+        } else { Launcher.close(p, keepRunning: appsInUse(except: id)) }
         scheduleCheck(id, opened: problem.opened)
     }
 
@@ -581,7 +590,7 @@ func formatDuration(_ t: TimeInterval) -> String {
     return "\(mins / 60)h \(mins % 60)m"
 }
 
-/// "3 days left", "due tomorrow", "due today", "2 days overdue".
+/// "due in 3 days", "due tomorrow", "due today", "2 days overdue".
 func deadlineText(_ deadline: Date, now: Date = Date()) -> String {
     let cal = Calendar.current
     let days = cal.dateComponents([.day], from: cal.startOfDay(for: now), to: cal.startOfDay(for: deadline)).day ?? 0
@@ -589,5 +598,5 @@ func deadlineText(_ deadline: Date, now: Date = Date()) -> String {
     if days == -1 { return "1 day overdue" }
     if days == 0 { return "due today" }
     if days == 1 { return "due tomorrow" }
-    return "\(days) days left"
+    return "due in \(days) days"
 }

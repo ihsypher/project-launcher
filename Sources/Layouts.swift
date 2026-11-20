@@ -89,11 +89,13 @@ enum Layouts {
         }
     }
 
-    /// Windows take a moment to appear after opening, so apply twice.
-    static func applySoon(_ frames: [SavedFrame]) {
+    /// Windows take a moment to appear after opening, so apply twice,
+    /// unless the project has been closed again in the meantime.
+    static func applySoon(_ frames: [SavedFrame], while stillOpen: @escaping @MainActor () -> Bool) {
         Task { @MainActor in
-            for delay in [1.5, 3.5] {
+            for delay in [1.5, 2.0] {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard stillOpen() else { return }
                 apply(frames)
             }
         }
@@ -120,7 +122,11 @@ enum Capture {
         var paths: [String] = []
         func add(_ path: String) {
             let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-            guard FileManager.default.fileExists(atPath: resolved) else { return }
+            var isFolder: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: resolved, isDirectory: &isFolder) else { return }
+            // Folders aren't documents (Terminal reports its current folder as one), but
+            // document packages like .pages or .key are.
+            if isFolder.boolValue && !NSWorkspace.shared.isFilePackage(atPath: resolved) { return }
             let short = (resolved as NSString).abbreviatingWithTildeInPath
             if !paths.contains(short) { paths.append(short) }
         }

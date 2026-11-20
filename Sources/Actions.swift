@@ -5,7 +5,8 @@ import ApplicationServices
 
 @MainActor
 enum Launcher {
-    static func open(_ p: Project) {
+    /// `stillOpen` stops the layout being re-applied once the project has been closed again.
+    static func open(_ p: Project, stillOpen: @escaping @MainActor () -> Bool = { true }) {
         Log.write("OPEN \(p.name): files=\(p.files) brave=\(p.braveWindowNames) claude=\(p.claudeLink)")
         var missing: [String] = []
         for path in p.files {
@@ -28,8 +29,10 @@ enum Launcher {
         // Claude last, so the chat ends up in front.
         ClaudeApp.open(link: p.claudeLink)
         // Put windows back where they were saved for this screen setup.
-        if let frames = p.layouts[ScreenSetup.currentKey()], !frames.isEmpty {
-            Layouts.applySoon(frames)
+        // (Only for files still in the project: a removed file's saved position is ignored.)
+        if let frames = p.layouts[ScreenSetup.currentKey()]?.filter({ $0.kind != "file" || p.files.contains($0.key) }),
+           !frames.isEmpty {
+            Layouts.applySoon(frames, while: stillOpen)
         }
     }
 
@@ -78,7 +81,11 @@ enum Launcher {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { apps.forEach { $0.terminate() } }
         }
         if !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty {
-            ClaudeApp.close(mode: p.claudeOnClose)
+            if let id = ClaudeApp.bundleID(), keepRunning.contains(id) {
+                Log.write("  leave Claude: another open project uses it")
+            } else {
+                ClaudeApp.close(mode: p.claudeOnClose)
+            }
         }
         // Minimise (not close) the named Brave windows.
         for name in p.braveWindowNames.map({ $0.trimmingCharacters(in: .whitespaces) }) where !name.isEmpty {
@@ -167,9 +174,32 @@ enum ClaudeApp {
     static func close(mode: String) {
         guard mode != "leave", let bundleID = bundleID() else { return }
         Log.write("  \(mode) Claude")
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        for app in apps {
             if mode == "quit" { app.terminate() } else { app.hide() }
         }
+        guard mode == "hide" else { return }
+        // Claude doesn't always take the first hide (e.g. while it's busy): check and hide again,
+        // through Accessibility if need be.
+        for delay in [0.6, 2.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                MainActor.assumeIsolated {
+                    for app in apps where !app.isTerminated && !app.isHidden {
+                        Log.write("  Claude still showing after \(delay)s, hiding again")
+                        if !app.hide() {
+                            AXUIElementSetAttributeValue(AXUIElementCreateApplication(app.processIdentifier),
+                                                         kAXHiddenAttribute as CFString, kCFBooleanTrue)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static func isShowing() -> Bool {
+        guard let id = bundleID() else { return false }
+        return NSRunningApplication.runningApplications(withBundleIdentifier: id)
+            .contains { !$0.isTerminated && !$0.isHidden }
     }
 }
 
@@ -748,6 +778,14 @@ enum Verify {
         quitApps.formUnion(p.quitAppsOnClose.filter { p.files.contains($0) }.compactMap(appBundleID))
         for appID in quitApps.subtracting(keepRunning) where isRunning(appID) {
             issues.append(Issue(text: "\(appName(appID)) is still running (it may be asking to save)"))
+        }
+        if !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty,
+           let id = ClaudeApp.bundleID(), !keepRunning.contains(id) {
+            if p.claudeOnClose == "hide" && ClaudeApp.isShowing() {
+                issues.append(Issue(text: "Claude is still showing"))
+            } else if p.claudeOnClose == "quit" && isRunning(id) {
+                issues.append(Issue(text: "Claude is still running"))
+            }
         }
         return issues
     }
