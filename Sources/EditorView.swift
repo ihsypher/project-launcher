@@ -147,15 +147,17 @@ struct ProjectDetail: View {
                             Text("missing").font(.caption).foregroundStyle(.red)
                         }
                         Spacer()
-                        if isApp(path) {
+                        if isApp(path) || closesWholeApp(path) {
                             Picker("On close", selection: appCloseMode(for: path)) {
-                                Text("Quit").tag("quit")
-                                Text("Hide").tag("hide")
+                                Text(closesWholeApp(path) ? "Quit \(appName(for: path))" : "Quit").tag("quit")
+                                Text(closesWholeApp(path) ? "Hide \(appName(for: path))" : "Hide").tag("hide")
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
                             .fixedSize()
-                            .help("What happens to this app when you close the project")
+                            .help(closesWholeApp(path)
+                                  ? "\(appName(for: path)) can't close one file, so closing the project quits or hides it (unless another open project uses it)"
+                                  : "What happens to this app when you close the project")
                         }
                         Button {
                             project.files.removeAll { $0 == path }
@@ -169,7 +171,7 @@ struct ProjectDetail: View {
             } header: {
                 Text("Files")
             } footer: {
-                Text("Files open in their default app (PDF in Preview, .docx in Word, .xlsx in Excel), and closing the project closes only those windows. You can add apps too (e.g. Claude from Applications): closing the project quits them, or hides them if you choose Hide.")
+                Text("Files open in their default app (PDF in Preview, .docx in Word, .xlsx in Excel), and closing the project closes only those windows. You can add apps too (e.g. Claude from Applications): closing the project quits them, or hides them if you choose Hide. MATLAB can't close a single file, so a project with MATLAB files quits or hides MATLAB instead. Apps another open project still uses are left running.")
             }
 
             Section {
@@ -353,6 +355,13 @@ struct ProjectDetail: View {
             get: { project.deadline ?? Date() },
             set: { project.deadline = $0 }
         )
+    }
+
+    /// e.g. "MATLAB" for a .m file.
+    private func appName(for path: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: expandPath(path))) else { return "App" }
+        let name = FileManager.default.displayName(atPath: url.path)
+        return name.hasPrefix("MATLAB") ? "MATLAB" : (name as NSString).deletingPathExtension
     }
 
     private func appCloseMode(for path: String) -> Binding<String> {

@@ -167,7 +167,10 @@ final class ProjectStore: ObservableObject {
     }
 
     func close(_ p: Project) {
-        Launcher.close(p)
+        // Apps another open project still uses are left running.
+        let inUse = Set(projects.filter { $0.id != p.id && isOpen($0) }
+            .flatMap { $0.files.compactMap(wholeAppBundleID) })
+        Launcher.close(p, keepRunning: inUse)
         openIDs.remove(p.id)
         endSession(p.id)
     }
@@ -375,6 +378,25 @@ func expandPath(_ path: String) -> String {
 
 func isApp(_ path: String) -> Bool {
     (path as NSString).pathExtension.lowercased() == "app"
+}
+
+/// Apps whose documents can't be closed one at a time from outside (MATLAB's files are tabs
+/// in one window, invisible to Accessibility and scripting). Their files close the whole app.
+private let wholeAppDocumentApps: Set<String> = ["com.mathworks.matlab"]
+
+/// The app that closing this entry quits or hides: the app itself for a .app,
+/// or e.g. MATLAB for a .m file. nil for ordinary documents.
+func wholeAppBundleID(_ path: String) -> String? {
+    let url = URL(fileURLWithPath: expandPath(path))
+    if isApp(path) { return Bundle(url: url)?.bundleIdentifier }
+    guard let appURL = NSWorkspace.shared.urlForApplication(toOpen: url),
+          let id = Bundle(url: appURL)?.bundleIdentifier, wholeAppDocumentApps.contains(id) else { return nil }
+    return id
+}
+
+/// A document (not a .app) that can only be closed by closing its whole app.
+func closesWholeApp(_ path: String) -> Bool {
+    !isApp(path) && wholeAppBundleID(path) != nil
 }
 
 func formatDuration(_ t: TimeInterval) -> String {

@@ -29,24 +29,35 @@ enum Launcher {
         }
     }
 
-    static func close(_ p: Project) {
+    /// `keepRunning`: bundle IDs of apps another open project still uses.
+    static func close(_ p: Project, keepRunning: Set<String> = []) {
         Log.write("CLOSE \(p.name): files=\(p.files)")
         // Close ONLY this project's document windows. Apps stay running,
         // so other modules' files in Word/Excel/Preview are untouched.
-        let docs = p.files.filter { !isApp($0) }
+        let docs = p.files.filter { wholeAppBundleID($0) == nil }
         if !docs.isEmpty {
             WindowCloser.close(files: docs)
         }
-        // Apps added to the project (e.g. Claude.app): quit them, or hide if chosen.
-        for path in p.files where isApp(path) {
-            guard let bundleID = Bundle(url: URL(fileURLWithPath: expandPath(path)))?.bundleIdentifier else { continue }
-            for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
-                if p.hideAppsOnClose.contains(path) {
-                    Log.write("  hide app \(app.localizedName ?? bundleID)")
-                    app.hide()
-                } else {
-                    Log.write("  quit app \(app.localizedName ?? bundleID)")
-                    app.terminate()
+        // Apps added to the project (e.g. Claude.app), and apps like MATLAB whose files
+        // can't be closed one by one: quit them, or hide if chosen.
+        var handled: Set<String> = []
+        for path in p.files {
+            guard let bundleID = wholeAppBundleID(path), handled.insert(bundleID).inserted else { continue }
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            guard let name = apps.first?.localizedName else { continue }
+            if keepRunning.contains(bundleID) {
+                Log.write("  leave \(name) running: another open project uses it")
+            } else if p.hideAppsOnClose.contains(path) {
+                Log.write("  hide app \(name)")
+                apps.forEach { $0.hide() }
+            } else {
+                Log.write("  quit app \(name)")
+                apps.forEach { $0.terminate() }
+                // Some apps (MATLAB) take a while, or stop to ask about unsaved work.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                    if apps.contains(where: { !$0.isTerminated }) {
+                        Log.write("  \(name) still running 10s after quitting (slow, or asking to save?)")
+                    }
                 }
             }
         }
@@ -559,6 +570,7 @@ enum WindowCloser {
         }
         let seen = Seen()
         closeOfficeDocuments(files, seen)
+        closeWithScripting(files, seen)
         pressAll(files, seen, pass: "0s")
         for (i, delay) in retryDelays.enumerated() {
             let last = i == retryDelays.count - 1
@@ -576,6 +588,8 @@ enum WindowCloser {
     private final class Seen {
         var pressed: Set<String> = []
         var paths: Set<String> = []
+        /// Files an app was asked to close itself. Their windows get a moment before any press.
+        var scripted: Set<String> = []
     }
 
     /// Presses close on each matching window, leaving alone any that are asking to save.
@@ -591,6 +605,8 @@ enum WindowCloser {
             let what = "  [\(pass)] \(AX.describe(item.window)) for \((item.path as NSString).lastPathComponent)"
             if AX.hasSheet(item.window) {
                 Log.write(what + ": skipped, showing a sheet")
+            } else if pass == "0s" && seen.scripted.contains(item.path) {
+                Log.write(what + ": left for the app to close")
             } else if seen.pressed.contains(item.path) {
                 Log.write(what + ": skipped, already pressed")
             } else {
@@ -621,6 +637,41 @@ enum WindowCloser {
         }
     }
 
+    /// Asks scriptable apps (Preview, TextEdit and most of Apple's apps) to close the project's
+    /// documents by path. Closes every one, including Preview documents in background tabs,
+    /// the way the app normally would (unsaved work still prompts). Apps that can't do this
+    /// fall through to the close-button press a moment later.
+    private static func closeWithScripting(_ files: [String], _ seen: Seen) {
+        let docs = files.filter { !seen.pressed.contains($0) }
+        guard !docs.isEmpty else { return }
+
+        // Which app has each file: its default app, plus any app showing it in a window.
+        var byApp: [String: Set<String>] = [:]
+        for f in docs {
+            let url = URL(fileURLWithPath: expandPath(f)).resolvingSymlinksInPath()
+            if let appURL = NSWorkspace.shared.urlForApplication(toOpen: url),
+               let id = Bundle(url: appURL)?.bundleIdentifier {
+                byApp[id, default: []].insert(f)
+            }
+        }
+        for item in AX.documentWindows(files: docs) {
+            var pid: pid_t = 0
+            AXUIElementGetPid(item.window, &pid)
+            if let id = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier {
+                byApp[id, default: []].insert(item.path)
+            }
+        }
+
+        for (id, appFiles) in byApp {
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first,
+                  Scripting.isScriptable(app) else { continue }
+            let paths = appFiles.map { URL(fileURLWithPath: expandPath($0)).resolvingSymlinksInPath().path }
+            Log.write("  [0s] asking \(app.localizedName ?? id) to close: \(paths.map { ($0 as NSString).lastPathComponent })")
+            Scripting.closeDocuments(appID: id, paths: paths)
+            seen.scripted.formUnion(appFiles)
+        }
+    }
+
     /// Word/Excel/PowerPoint documents still open that never had a visible window during this close
     /// (e.g. full screen in another Space). Documents whose window already closed are skipped:
     /// Office can keep listing a OneDrive file while it uploads, and closing it again
@@ -638,6 +689,44 @@ enum WindowCloser {
             Log.write("  [office] closing via AppleScript: \(leftovers.map(\.name))")
             Office.close(leftovers)
         }
+    }
+}
+
+// MARK: - Closing documents through an app's own scripting
+
+@MainActor
+enum Scripting {
+    /// Apps handled elsewhere: Office by name (see Office), Brave and Claude aren't documents.
+    private static let skip: Set<String> = [
+        "com.microsoft.Word", "com.microsoft.Excel", "com.microsoft.Powerpoint", Brave.bundleID,
+    ]
+
+    static func isScriptable(_ app: NSRunningApplication) -> Bool {
+        guard let id = app.bundleIdentifier, !skip.contains(id),
+              let url = app.bundleURL, let info = Bundle(url: url)?.infoDictionary else { return false }
+        let flag = info["NSAppleScriptEnabled"]
+        return (flag as? Bool) == true || (flag as? String)?.lowercased() == "yes"
+    }
+
+    /// "close (every document whose path is ...) saving ask", sent without waiting for a reply
+    /// so a save prompt can't freeze Project Launcher.
+    static func closeDocuments(appID: String, paths: [String]) {
+        guard !paths.isEmpty else { return }
+        let condition = paths.map { "path is \"\(escape($0))\"" }.joined(separator: " or ")
+        AppleScriptRunner.result("""
+        ignoring application responses
+            tell application id "\(appID)"
+                try
+                    close (every document whose \(condition)) saving ask
+                end try
+            end tell
+        end ignoring
+        """)
+    }
+
+    private static func escape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }
 
