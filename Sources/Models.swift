@@ -37,19 +37,34 @@ struct SavedFrame: Codable, Hashable {
     var rect: CGRect { CGRect(x: x, y: y, width: w, height: h) }
 }
 
+/// A named set of projects. Only a name: time is totalled from its projects.
+struct ProjectGroup: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var name: String = "New Group"
+}
+
 struct Project: Codable, Identifiable, Hashable {
     var id = UUID()
     var name: String = "New Project"
-    /// The project this one sits under in the tree (e.g. "Radiation" for "Assignment 1"). nil = top level.
-    var parentID: UUID? = nil
+    /// The group this project is in (e.g. "Radiation"). nil = not in a group.
+    var groupID: UUID? = nil
+    /// Sub-project parent from versions 1.2 to 1.12, only read to convert to groups.
+    var legacyParentID: UUID? = nil
     /// Absolute paths (may start with ~). Each opens in its default app. May include .app bundles.
     var files: [String] = []
     /// Web pages to open in Brave if the named window doesn't exist yet.
     var urls: [String] = []
-    /// Name you gave the Brave window (Window > Name Window...). Restored on open, minimised on close.
-    var braveWindowName: String = ""
+    /// Names you gave Brave windows (Window > Name Window...). Restored on open, minimised on close.
+    var braveWindowNames: [String] = []
+    /// SF Symbol shown for the project in the menu and editor.
+    var icon: String = "doc.text"
+    /// One of ProjectColor's names.
+    var color: String = "blue"
     /// Apps in `files` that should be hidden (not quit) when the project closes.
     var hideAppsOnClose: [String] = []
+    /// Word/Excel/PowerPoint files whose app should be quit (not just the file closed)
+    /// when the project closes.
+    var quitAppsOnClose: [String] = []
     /// A claude.ai chat or project link, opened in the Claude desktop app.
     var claudeLink: String = ""
     /// What happens to the Claude app when the project closes: "quit", "hide" or "leave".
@@ -64,23 +79,36 @@ struct Project: Codable, Identifiable, Hashable {
     var activeSession: ActiveSession? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, name, parentID, files, urls, braveWindowName, hideAppsOnClose, claudeLink, claudeOnClose
+        case id, name, groupID, files, urls, braveWindowNames, icon, color, hideAppsOnClose, quitAppsOnClose, claudeLink, claudeOnClose
         case deadline, layouts, timeLog, activeSession
+        case legacyParentID = "parentID"
     }
 }
 
 extension Project {
+    private enum LegacyKeys: String, CodingKey { case braveWindowName }
+
     /// Tolerant decoding, so projects saved by older versions still load.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init()
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? "New Project"
-        parentID = try c.decodeIfPresent(UUID.self, forKey: .parentID)
+        groupID = try c.decodeIfPresent(UUID.self, forKey: .groupID)
+        legacyParentID = try c.decodeIfPresent(UUID.self, forKey: .legacyParentID)
         files = try c.decodeIfPresent([String].self, forKey: .files) ?? []
         urls = try c.decodeIfPresent([String].self, forKey: .urls) ?? []
-        braveWindowName = try c.decodeIfPresent(String.self, forKey: .braveWindowName) ?? ""
+        braveWindowNames = try c.decodeIfPresent([String].self, forKey: .braveWindowNames) ?? []
+        // Up to 1.11 a project had one Brave window.
+        if braveWindowNames.isEmpty,
+           let old = try decoder.container(keyedBy: LegacyKeys.self).decodeIfPresent(String.self, forKey: .braveWindowName),
+           !old.isEmpty {
+            braveWindowNames = [old]
+        }
+        icon = try c.decodeIfPresent(String.self, forKey: .icon) ?? "doc.text"
+        color = try c.decodeIfPresent(String.self, forKey: .color) ?? "blue"
         hideAppsOnClose = try c.decodeIfPresent([String].self, forKey: .hideAppsOnClose) ?? []
+        quitAppsOnClose = try c.decodeIfPresent([String].self, forKey: .quitAppsOnClose) ?? []
         claudeLink = try c.decodeIfPresent(String.self, forKey: .claudeLink) ?? ""
         claudeOnClose = try c.decodeIfPresent(String.self, forKey: .claudeOnClose) ?? "hide"
         deadline = try c.decodeIfPresent(Date.self, forKey: .deadline)
@@ -89,9 +117,9 @@ extension Project {
         activeSession = try c.decodeIfPresent(ActiveSession.self, forKey: .activeSession)
     }
 
-    /// Whether opening this project does anything (a parent can be just a group).
+    /// Whether the project has anything to open.
     var hasContent: Bool {
-        !files.isEmpty || !urls.isEmpty || !braveWindowName.isEmpty || !claudeLink.isEmpty
+        !files.isEmpty || !urls.isEmpty || !braveWindowNames.isEmpty || !claudeLink.isEmpty
     }
 
     /// Time spent with the project open, optionally only counting from `since`.
@@ -114,10 +142,16 @@ final class ProjectStore: ObservableObject {
     @Published var projects: [Project] = [] {
         didSet { save() }
     }
+    /// Named groups of projects (e.g. "Radiation"), shown as submenus.
+    @Published var groups: [ProjectGroup] = [] {
+        didSet { saveGroups() }
+    }
     /// Which projects are currently "open" (ticked).
     @Published private(set) var openIDs: Set<UUID> = []
     /// Which project the editor window shows.
     @Published var editorSelection: UUID?
+    /// What the check a few seconds after opening or closing found wrong, by project.
+    @Published private(set) var problems: [UUID: Problem] = [:]
     /// Set when GitHub has a newer version than this build.
     @Published private(set) var updateAvailable = false
 
@@ -160,19 +194,64 @@ final class ProjectStore: ObservableObject {
     }
 
     func open(_ p: Project) {
+        problems[p.id] = nil
         Launcher.open(p)
         openIDs.insert(p.id)
         let now = Date()
         update(p.id) { $0.activeSession = ActiveSession(start: now, lastBeat: now) }
+        scheduleCheck(p.id, opened: true)
     }
 
     func close(_ p: Project) {
-        // Apps another open project still uses are left running.
-        let inUse = Set(projects.filter { $0.id != p.id && isOpen($0) }
-            .flatMap { $0.files.compactMap(wholeAppBundleID) })
-        Launcher.close(p, keepRunning: inUse)
+        problems[p.id] = nil
+        Launcher.close(p, keepRunning: appsInUse(except: p.id))
         openIDs.remove(p.id)
         endSession(p.id)
+        scheduleCheck(p.id, opened: false)
+    }
+
+    /// Apps another open project still uses (its files' apps), which closing shouldn't quit.
+    private func appsInUse(except id: UUID) -> Set<String> {
+        Set(projects.filter { $0.id != id && isOpen($0) }.flatMap { $0.files.compactMap(appBundleID) })
+    }
+
+    // MARK: Checking it worked
+
+    /// 5 seconds after opening or closing, checks everything opened or closed.
+    /// Apps like Word (closing OneDrive files) and MATLAB (quitting) can take a few seconds.
+    private func scheduleCheck(_ id: UUID, opened: Bool) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let p = self.projects.first(where: { $0.id == id }),
+                      self.isOpen(p) == opened else { return } // toggled again since
+                let issues = opened ? Verify.afterOpen(p) : Verify.afterClose(p, keepRunning: self.appsInUse(except: id))
+                Log.write("CHECK \(opened ? "open" : "close") \(p.name): " + (issues.isEmpty ? "all OK" : issues.map(\.text).joined(separator: "; ")))
+                self.problems[id] = issues.isEmpty ? nil : Problem(opened: opened, issues: issues)
+            }
+        }
+    }
+
+    /// Runs the open or close again, then checks again.
+    func tryAgain(_ id: UUID) {
+        guard let p = projects.first(where: { $0.id == id }), let problem = problems[id] else { return }
+        problems[id] = nil
+        Log.write("TRY AGAIN \(problem.opened ? "open" : "close") \(p.name)")
+        if problem.opened { Launcher.open(p) } else { Launcher.close(p, keepRunning: appsInUse(except: id)) }
+        scheduleCheck(id, opened: problem.opened)
+    }
+
+    /// Quits an app (e.g. Word) still holding documents that didn't close, then checks again.
+    func quitStuckApp(_ appID: String, for id: UUID) {
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: appID) {
+            Log.write("QUIT \(app.localizedName ?? appID) (documents didn't close)")
+            app.terminate()
+        }
+        problems[id] = nil
+        scheduleCheck(id, opened: false)
+    }
+
+    func dismissProblem(_ id: UUID) {
+        problems[id] = nil
     }
 
     func closeAll() {
@@ -258,7 +337,7 @@ final class ProjectStore: ObservableObject {
 
     func captureNewProject() {
         var p = Capture.currentProject()
-        if p.files.isEmpty && p.braveWindowName.isEmpty && p.claudeLink.isEmpty {
+        if p.files.isEmpty && p.braveWindowNames.isEmpty && p.claudeLink.isEmpty {
             Alerts.show("Nothing to capture",
                         "Open the files, Brave window and Claude chat you want first, then try again. Project Launcher also needs Accessibility permission (System Settings > Privacy & Security > Accessibility) to see your open windows.")
             return
@@ -273,78 +352,90 @@ final class ProjectStore: ObservableObject {
         EditorWindow.shared.show(store: self)
     }
 
-    // MARK: Tree
-
-    /// Direct sub-projects of `id`, in list order. nil gives the top level
-    /// (including any whose parent no longer exists).
-    func children(of id: UUID?) -> [Project] {
-        guard let id else {
-            let ids = Set(projects.map(\.id))
-            return projects.filter { p in
-                guard let parent = p.parentID else { return true }
-                return parent == p.id || !ids.contains(parent)
-            }
+    /// Adds what's open now to an existing project: new documents (not ones another open
+    /// project has), the front Brave window if it isn't in the project, and the Claude chat
+    /// if it has none yet. Asks first,
+    /// then saves the window layout for this screen setup too.
+    func updateFromOpenWindows(_ id: UUID) {
+        guard let p = projects.first(where: { $0.id == id }) else { return }
+        func resolved(_ path: String) -> String {
+            URL(fileURLWithPath: expandPath(path)).resolvingSymlinksInPath().path
         }
-        return projects.filter { $0.parentID == id && $0.id != id }
+        let taken = Set((projects.filter { $0.id == id || isOpen($0) }).flatMap { $0.files.map(resolved) })
+        let newFiles = Capture.openFiles().filter { !taken.contains(resolved($0)) }
+        let brave = Brave.captureFrontWindow().flatMap { p.braveWindowNames.contains($0) ? nil : $0 }
+        let claude = p.claudeLink.isEmpty ? ClaudeApp.currentLink() : nil
+
+        var lines = newFiles.map { "• " + ($0 as NSString).lastPathComponent }
+        if let brave { lines.append("• Brave window: \(brave)") }
+        if claude != nil { lines.append("• The Claude chat that's open now") }
+        let message = lines.isEmpty
+            ? "Nothing new is open. Save the current window positions for \(p.name)?"
+            : "Add to \(p.name):\n\n" + lines.joined(separator: "\n")
+              + "\n\nThe current window positions are saved too. You can remove anything later in Edit Projects."
+        guard Alerts.confirm("Update \(p.name)?", message, ok: lines.isEmpty ? "Save Layout" : "Add") else { return }
+
+        Log.write("UPDATE \(p.name): added \(newFiles) brave=\(brave ?? "-") claude=\(claude ?? "-")")
+        update(id) { q in
+            q.files.append(contentsOf: newFiles)
+            if let brave { q.braveWindowNames.append(brave) }
+            if let claude { q.claudeLink = claude }
+        }
+        if let updated = projects.first(where: { $0.id == id }) {
+            let frames = Layouts.capture(updated)
+            if !frames.isEmpty { update(id) { $0.layouts[ScreenSetup.currentKey()] = frames } }
+        }
     }
 
-    /// All sub-projects below `id`, at any depth.
-    func descendants(of id: UUID) -> [Project] {
-        var result: [Project] = []
-        var seen: Set<UUID> = [id]
-        var queue = [id]
-        while !queue.isEmpty {
-            for c in children(of: queue.removeFirst()) where seen.insert(c.id).inserted {
-                result.append(c)
-                queue.append(c.id)
-            }
+    // MARK: Groups
+
+    func projects(in groupID: UUID?) -> [Project] {
+        let ids = Set(groups.map(\.id))
+        return projects.filter { p in
+            guard let g = groupID else { return p.groupID == nil || !ids.contains(p.groupID!) }
+            return p.groupID == g
         }
-        return result
     }
 
-    /// Every project in tree order with its depth, for indented lists.
-    func flattened() -> [(project: Project, depth: Int)] {
-        var result: [(Project, Int)] = []
-        var seen: Set<UUID> = []
-        func walk(_ parent: UUID?, _ depth: Int) {
-            for p in children(of: parent) where seen.insert(p.id).inserted {
-                result.append((p, depth))
-                walk(p.id, depth + 1)
-            }
-        }
-        walk(nil, 0)
-        return result
+    func group(of p: Project) -> ProjectGroup? {
+        groups.first { $0.id == p.groupID }
     }
 
-    /// e.g. "Radiation › Assignment 1"
-    func path(of p: Project) -> String {
-        var names = [p.name]
-        var seen: Set<UUID> = [p.id]
-        var current = p.parentID
-        while let id = current, seen.insert(id).inserted,
-              let parent = projects.first(where: { $0.id == id }) {
-            names.insert(parent.name, at: 0)
-            current = parent.parentID
-        }
-        return names.joined(separator: " › ")
+    /// e.g. "Radiation › Assignment 1", or just the name if it isn't in a group.
+    func displayName(_ p: Project) -> String {
+        group(of: p).map { "\($0.name) › \(p.name)" } ?? p.name
+    }
+
+    /// Time spent across every project in a group.
+    func groupTime(_ groupID: UUID, since: Date? = nil) -> TimeInterval {
+        projects(in: groupID).reduce(0) { $0 + $1.timeSpent(since: since) }
     }
 
     // MARK: Editing
 
-    func addProject(parent: UUID? = nil) -> UUID {
-        var p = Project(name: parent == nil ? "New Project" : "New Sub-project")
-        p.parentID = parent
+    func addProject(group: UUID? = nil) -> UUID {
+        var p = Project(name: "New Project")
+        p.groupID = group
         projects.append(p)
         return p.id
     }
 
-    /// Sub-projects of a deleted project move up a level rather than being deleted.
+    func addGroup() -> UUID {
+        let g = ProjectGroup()
+        groups.append(g)
+        return g.id
+    }
+
+    /// Deletes a project, or a group (its projects stay, just ungrouped).
     func delete(id: UUID) {
-        let parent = projects.first(where: { $0.id == id })?.parentID
-        var copy = projects
-        copy.removeAll { $0.id == id }
-        for i in copy.indices where copy[i].parentID == id { copy[i].parentID = parent }
-        projects = copy
+        if groups.contains(where: { $0.id == id }) {
+            groups.removeAll { $0.id == id }
+            var copy = projects
+            for i in copy.indices where copy[i].groupID == id { copy[i].groupID = nil }
+            projects = copy
+            return
+        }
+        projects.removeAll { $0.id == id }
         openIDs.remove(id)
     }
 
@@ -353,12 +444,56 @@ final class ProjectStore: ObservableObject {
         change(&projects[i])
     }
 
-    // MARK: Persistence (~/Library/Application Support/ProjectLauncher/projects.json)
+    // MARK: Persistence (~/Library/Application Support/ProjectLauncher/projects.json and groups.json)
+
+    private var groupsURL: URL { fileURL.deletingLastPathComponent().appendingPathComponent("groups.json") }
 
     private func load() {
+        if let data = try? Data(contentsOf: groupsURL),
+           let decoded = try? JSONDecoder().decode([ProjectGroup].self, from: data) {
+            groups = decoded
+        }
         guard let data = try? Data(contentsOf: fileURL),
               let decoded = try? JSONDecoder().decode([Project].self, from: data) else { return }
         projects = decoded
+        migrateSubProjects()
+    }
+
+    /// Version 1.2 to 1.12 nested projects under other projects. Each top-level parent becomes
+    /// a group holding everything below it. A parent that was only a container (no files,
+    /// links or time) is removed; one with its own content stays as a project in the group.
+    private func migrateSubProjects() {
+        guard projects.contains(where: { $0.legacyParentID != nil }) else { return }
+        let byID = Dictionary(projects.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        func root(_ p: Project) -> Project {
+            var current = p
+            var seen: Set<UUID> = [p.id]
+            while let parent = current.legacyParentID.flatMap({ byID[$0] }), seen.insert(parent.id).inserted {
+                current = parent
+            }
+            return current
+        }
+        var newGroups: [UUID: ProjectGroup] = [:]
+        var copy = projects
+        for i in copy.indices where copy[i].legacyParentID != nil {
+            let top = root(copy[i])
+            guard top.id != copy[i].id else { continue }
+            if newGroups[top.id] == nil { newGroups[top.id] = ProjectGroup(name: top.name) }
+            copy[i].groupID = newGroups[top.id]!.id
+        }
+        var remove: Set<UUID> = []
+        for (topID, g) in newGroups {
+            guard let i = copy.firstIndex(where: { $0.id == topID }) else { continue }
+            if copy[i].hasContent || !copy[i].timeLog.isEmpty {
+                copy[i].groupID = g.id
+            } else {
+                remove.insert(topID)
+            }
+        }
+        copy.removeAll { remove.contains($0.id) }
+        for i in copy.indices { copy[i].legacyParentID = nil }
+        groups.append(contentsOf: newGroups.values.sorted { $0.name < $1.name })
+        projects = copy
     }
 
     private func save() {
@@ -367,6 +502,33 @@ final class ProjectStore: ObservableObject {
         if let data = try? encoder.encode(projects) {
             try? data.write(to: fileURL, options: .atomic)
         }
+    }
+
+    private func saveGroups() {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(groups) {
+            try? data.write(to: groupsURL, options: .atomic)
+        }
+    }
+}
+
+// MARK: - Problems found by the check after opening or closing
+
+struct Issue: Hashable {
+    var text: String
+    /// The app holding a document that didn't close, so it can be quit instead.
+    var stuckApp: String? = nil
+}
+
+struct Problem: Hashable {
+    var opened: Bool
+    var issues: [Issue]
+    var stuckApps: Set<String> { Set(issues.compactMap(\.stuckApp)) }
+    /// e.g. "1 window still open" or "2 things didn't open".
+    var summary: String {
+        let n = issues.count
+        return opened ? "\(n) thing\(n == 1 ? "" : "s") didn't open" : "\(n) thing\(n == 1 ? "" : "s") still open"
     }
 }
 
@@ -392,6 +554,20 @@ func wholeAppBundleID(_ path: String) -> String? {
     guard let appURL = NSWorkspace.shared.urlForApplication(toOpen: url),
           let id = Bundle(url: appURL)?.bundleIdentifier, wholeAppDocumentApps.contains(id) else { return nil }
     return id
+}
+
+/// The app that opens this entry: the app itself for a .app, otherwise the file's default app.
+func appBundleID(_ path: String) -> String? {
+    let url = URL(fileURLWithPath: expandPath(path))
+    if isApp(path) { return Bundle(url: url)?.bundleIdentifier }
+    return NSWorkspace.shared.urlForApplication(toOpen: url).flatMap { Bundle(url: $0)?.bundleIdentifier }
+}
+
+let officeAppIDs: Set<String> = ["com.microsoft.Word", "com.microsoft.Excel", "com.microsoft.Powerpoint"]
+
+/// A Word, Excel or PowerPoint document.
+func isOfficeDocument(_ path: String) -> Bool {
+    !isApp(path) && appBundleID(path).map(officeAppIDs.contains) == true
 }
 
 /// A document (not a .app) that can only be closed by closing its whole app.

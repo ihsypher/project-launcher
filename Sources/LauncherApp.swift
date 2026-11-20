@@ -10,7 +10,9 @@ struct LauncherApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("Project Launcher", systemImage: "square.stack.3d.up") {
+        // The icon turns into a warning while something didn't open or close properly.
+        MenuBarExtra("Project Launcher",
+                     systemImage: store.problems.isEmpty ? "square.stack.3d.up" : "exclamationmark.triangle") {
             MenuContent()
                 .environmentObject(store)
         }
@@ -26,10 +28,32 @@ struct MenuContent: View {
             Text("No projects yet")
         }
 
+        // Anything the check after opening/closing found wrong.
+        ForEach(store.projects.filter { store.problems[$0.id] != nil }) { p in
+            if let problem = store.problems[p.id] {
+                Menu("⚠︎ \(p.name): \(problem.summary)") {
+                    ForEach(problem.issues, id: \.self) { Text($0.text) }
+                    Divider()
+                    Button("Try Again") { store.tryAgain(p.id) }
+                    if !problem.opened {
+                        ForEach(Array(problem.stuckApps).sorted(), id: \.self) { appID in
+                            Button("Quit \(appDisplayName(appID))") { store.quitStuckApp(appID, for: p.id) }
+                        }
+                    }
+                    Button("Show Log") { NSWorkspace.shared.activateFileViewerSelecting([Log.url]) }
+                    Button("Dismiss") { store.dismissProblem(p.id) }
+                }
+            }
+        }
+        if !store.problems.isEmpty { Divider() }
+
         // Each project is a toggle: a tick means it's open. Click to open/close.
-        // Projects with sub-projects become submenus.
-        ForEach(store.children(of: nil)) { project in
-            ProjectMenuItem(project: project)
+        // Groups are submenus of their projects.
+        ForEach(store.projects(in: nil)) { project in
+            ProjectToggle(project: project)
+        }
+        ForEach(store.groups) { group in
+            GroupMenu(group: group)
         }
 
         Divider()
@@ -37,6 +61,7 @@ struct MenuContent: View {
         Button("Save Window Layout of Open Projects") { store.saveLayoutsForOpenProjects() }
             .disabled(store.openIDs.isEmpty)
         Button("New Project from Open Windows") { store.captureNewProject() }
+        updateMenu
         Button("Close All Open Projects") { store.closeAll() }
             .disabled(store.openIDs.isEmpty)
 
@@ -57,37 +82,43 @@ struct MenuContent: View {
         .keyboardShortcut("q")
     }
 
+    /// Adds newly opened documents to an open project. Picks the project directly
+    /// if only one is open, otherwise offers a submenu.
+    @ViewBuilder private var updateMenu: some View {
+        let open = store.projects.filter { store.isOpen($0) }
+        if open.count == 1, let p = open.first {
+            Button("Update \(p.name) from Open Windows") { store.updateFromOpenWindows(p.id) }
+        } else {
+            Menu("Update Project from Open Windows") {
+                ForEach(open) { p in
+                    Button(store.displayName(p)) { store.updateFromOpenWindows(p.id) }
+                }
+            }
+            .disabled(open.isEmpty)
+        }
+    }
+
 }
 
-/// One project in the menu: a toggle, or a submenu if it has sub-projects.
-struct ProjectMenuItem: View {
+/// e.g. "Word" for com.microsoft.Word.
+@MainActor
+func appDisplayName(_ appID: String) -> String {
+    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: appID) else { return appID }
+    let name = (FileManager.default.displayName(atPath: url.path) as NSString).deletingPathExtension
+    return name.replacingOccurrences(of: "Microsoft ", with: "")
+}
+
+/// One project in the menu: a tick means it's open. Click to open/close.
+struct ProjectToggle: View {
     @EnvironmentObject var store: ProjectStore
     let project: Project
 
     var body: some View {
-        let kids = store.children(of: project.id)
-        if kids.isEmpty {
-            toggle
-        } else {
-            Menu(groupLabel) {
-                // A parent with its own files etc. can be opened too (e.g. shared course notes).
-                if project.hasContent {
-                    toggle
-                    Divider()
-                }
-                ForEach(kids) { child in
-                    ProjectMenuItem(project: child)
-                }
-            }
-        }
-    }
-
-    private var toggle: some View {
         Toggle(isOn: Binding(
             get: { store.isOpen(project) },
             set: { _ in store.toggle(project) }
         )) {
-            Text(label)
+            Label(label, systemImage: project.icon)
         }
     }
 
@@ -101,18 +132,35 @@ struct ProjectMenuItem: View {
         }
         return extras.isEmpty ? project.name : "\(project.name)  (\(extras.joined(separator: ", ")))"
     }
+}
 
-    /// e.g. "Radiation  (1 open, next: 3 days left)"
-    private var groupLabel: String {
-        let all = [project] + store.descendants(of: project.id)
+/// A group in the menu: a submenu of its projects.
+struct GroupMenu: View {
+    @EnvironmentObject var store: ProjectStore
+    let group: ProjectGroup
+
+    var body: some View {
+        let members = store.projects(in: group.id)
+        Menu {
+            if members.isEmpty { Text("No projects in this group") }
+            ForEach(members) { ProjectToggle(project: $0) }
+        } label: {
+            Label(label(members), systemImage: "folder")
+        }
+    }
+
+    /// e.g. "Radiation  (1 open, 2h 10m today, next: 3 days left)"
+    private func label(_ members: [Project]) -> String {
         var extras: [String] = []
-        let open = all.filter { store.isOpen($0) }.count
+        let open = members.filter { store.isOpen($0) }.count
         if open > 0 { extras.append("\(open) open") }
-        let today = Calendar.current.startOfDay(for: Date())
-        if let next = all.compactMap(\.deadline).filter({ $0 >= today }).min() {
+        let startOfDay = Calendar.current.startOfDay(for: Date())
+        let today = store.groupTime(group.id, since: startOfDay)
+        if today >= 60 { extras.append("\(formatDuration(today)) today") }
+        if let next = members.compactMap(\.deadline).filter({ $0 >= startOfDay }).min() {
             extras.append("next: \(deadlineText(next))")
         }
-        return extras.isEmpty ? project.name : "\(project.name)  (\(extras.joined(separator: ", ")))"
+        return extras.isEmpty ? group.name : "\(group.name)  (\(extras.joined(separator: ", ")))"
     }
 }
 
@@ -127,10 +175,10 @@ final class EditorWindow: NSObject {
         if window == nil {
             let root = EditorView()
                 .environmentObject(store)
-                .frame(minWidth: 680, minHeight: 440)
+                .frame(minWidth: 720, minHeight: 480)
             let w = ShortcutWindow(contentViewController: NSHostingController(rootView: root))
             w.title = "Project Launcher"
-            w.setContentSize(NSSize(width: 780, height: 520))
+            w.setContentSize(NSSize(width: 860, height: 600))
             w.isReleasedWhenClosed = false
             w.center()
             window = w

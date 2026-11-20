@@ -6,7 +6,7 @@ import ApplicationServices
 @MainActor
 enum Launcher {
     static func open(_ p: Project) {
-        Log.write("OPEN \(p.name): files=\(p.files) brave=\(p.braveWindowName) claude=\(p.claudeLink)")
+        Log.write("OPEN \(p.name): files=\(p.files) brave=\(p.braveWindowNames) claude=\(p.claudeLink)")
         var missing: [String] = []
         for path in p.files {
             let full = expandPath(path)
@@ -20,7 +20,11 @@ enum Launcher {
             Alerts.show("Some files couldn't be found",
                         "These may have been moved or renamed:\n\n" + missing.joined(separator: "\n"))
         }
-        Brave.show(windowName: p.braveWindowName, urls: p.urls)
+        // Backup pages go with the first window, if it isn't open.
+        let windows = p.braveWindowNames.isEmpty ? [""] : p.braveWindowNames
+        for (i, name) in windows.enumerated() {
+            Brave.show(windowName: name, urls: i == 0 ? p.urls : [])
+        }
         // Claude last, so the chat ends up in front.
         ClaudeApp.open(link: p.claudeLink)
         // Put windows back where they were saved for this screen setup.
@@ -61,12 +65,23 @@ enum Launcher {
                 }
             }
         }
+        // Word/Excel/PowerPoint set to quit with the project, after their files have been closed.
+        let officeToQuit = Set(p.quitAppsOnClose.filter { p.files.contains($0) }.compactMap(appBundleID))
+        for appID in officeToQuit {
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: appID)
+            guard let name = apps.first?.localizedName else { continue }
+            if keepRunning.contains(appID) {
+                Log.write("  leave \(name) running: another open project uses it")
+                continue
+            }
+            Log.write("  quit app \(name) (set to quit with this project)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { apps.forEach { $0.terminate() } }
+        }
         if !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty {
             ClaudeApp.close(mode: p.claudeOnClose)
         }
-        // Minimise (not close) the named Brave window.
-        let name = p.braveWindowName.trimmingCharacters(in: .whitespaces)
-        if !name.isEmpty {
+        // Minimise (not close) the named Brave windows.
+        for name in p.braveWindowNames.map({ $0.trimmingCharacters(in: .whitespaces) }) where !name.isEmpty {
             Brave.minimise(windowName: name)
         }
     }
@@ -692,6 +707,76 @@ enum WindowCloser {
     }
 }
 
+// MARK: - Checking that opening or closing worked
+
+@MainActor
+enum Verify {
+    /// Things that should have opened but aren't there.
+    static func afterOpen(_ p: Project) -> [Issue] {
+        var issues: [Issue] = []
+        let docs = p.files.filter { wholeAppBundleID($0) == nil && FileManager.default.fileExists(atPath: expandPath($0)) }
+        let open = openDocuments(docs)
+        for f in docs where !open.contains(f) {
+            issues.append(Issue(text: "\(name(f)) didn't open"))
+        }
+        for appID in Set(p.files.compactMap(wholeAppBundleID)) where !isRunning(appID) {
+            issues.append(Issue(text: "\(appName(appID)) isn't running"))
+        }
+        for brave in p.braveWindowNames.map({ $0.trimmingCharacters(in: .whitespaces) })
+        where !brave.isEmpty && Brave.bounds(windowName: brave) == nil {
+            issues.append(Issue(text: "Brave window \"\(brave)\" not found"))
+        }
+        if !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty,
+           let id = ClaudeApp.bundleID(), !isRunning(id) {
+            issues.append(Issue(text: "Claude isn't running"))
+        }
+        return issues
+    }
+
+    /// Things that should have closed but are still there. Windows asking to save don't count.
+    static func afterClose(_ p: Project, keepRunning: Set<String>) -> [Issue] {
+        var issues: [Issue] = []
+        let docs = p.files.filter { wholeAppBundleID($0) == nil }
+        let waiting = Set(AX.documentWindows(files: docs).filter { AX.hasSheet($0.window) }.map(\.path))
+        for f in openDocuments(docs) where !waiting.contains(f) {
+            let app = appBundleID(f)
+            issues.append(Issue(text: "\(name(f)) is still open",
+                                stuckApp: app.map(officeAppIDs.contains) == true ? app : nil))
+        }
+        var quitApps = Set(p.files.filter { wholeAppBundleID($0) != nil && !p.hideAppsOnClose.contains($0) }
+            .compactMap(wholeAppBundleID))
+        quitApps.formUnion(p.quitAppsOnClose.filter { p.files.contains($0) }.compactMap(appBundleID))
+        for appID in quitApps.subtracting(keepRunning) where isRunning(appID) {
+            issues.append(Issue(text: "\(appName(appID)) is still running (it may be asking to save)"))
+        }
+        return issues
+    }
+
+    /// Which of these files are open anywhere: in a window, a Preview tab, or Office.
+    private static func openDocuments(_ files: [String]) -> Set<String> {
+        func resolved(_ path: String) -> String {
+            URL(fileURLWithPath: expandPath(path)).resolvingSymlinksInPath().path
+        }
+        var open = Set(AX.documentWindows(files: files).map(\.path))
+        let elsewhere = Set((Office.openDocumentPaths() + Scripting.previewDocumentPaths()).map(resolved))
+        for f in files where elsewhere.contains(resolved(f)) { open.insert(f) }
+        return open
+    }
+
+    private static func isRunning(_ appID: String) -> Bool {
+        NSRunningApplication.runningApplications(withBundleIdentifier: appID).contains { !$0.isTerminated }
+    }
+
+    private static func appName(_ appID: String) -> String {
+        let name = NSRunningApplication.runningApplications(withBundleIdentifier: appID).first?.localizedName
+            ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: appID)
+                .map { FileManager.default.displayName(atPath: $0.path) } ?? appID
+        return name.hasPrefix("MATLAB") ? "MATLAB" : (name as NSString).deletingPathExtension
+    }
+
+    private static func name(_ path: String) -> String { (path as NSString).lastPathComponent }
+}
+
 // MARK: - Closing documents through an app's own scripting
 
 @MainActor
@@ -700,6 +785,21 @@ enum Scripting {
     private static let skip: Set<String> = [
         "com.microsoft.Word", "com.microsoft.Excel", "com.microsoft.Powerpoint", Brave.bundleID,
     ]
+
+    /// Every document open in Preview, including ones in background tabs.
+    static func previewDocumentPaths() -> [String] {
+        let id = "com.apple.Preview"
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty,
+              let r = AppleScriptRunner.result("""
+              tell application id "\(id)"
+                  try
+                      return path of every document
+                  end try
+              end tell
+              return {}
+              """), r.numberOfItems > 0 else { return [] }
+        return (1...r.numberOfItems).compactMap { r.atIndex($0)?.stringValue }
+    }
 
     static func isScriptable(_ app: NSRunningApplication) -> Bool {
         guard let id = app.bundleIdentifier, !skip.contains(id),
@@ -772,6 +872,17 @@ enum Log {
 
 @MainActor
 enum Alerts {
+    /// OK/Cancel question. True if OK was chosen.
+    static func confirm(_ title: String, _ message: String, ok: String) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: ok)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     static func show(_ title: String, _ message: String) {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()

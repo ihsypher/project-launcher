@@ -43,10 +43,11 @@ enum Layouts {
             }
         }
 
-        // Brave window
-        let name = p.braveWindowName.trimmingCharacters(in: .whitespaces)
-        if !name.isEmpty, let r = Brave.bounds(windowName: name) {
-            frames.append(SavedFrame(kind: "brave", key: name, rect: r))
+        // Brave windows
+        for name in p.braveWindowNames.map({ $0.trimmingCharacters(in: .whitespaces) }) where !name.isEmpty {
+            if let r = Brave.bounds(windowName: name) {
+                frames.append(SavedFrame(kind: "brave", key: name, rect: r))
+            }
         }
 
         // Claude
@@ -108,7 +109,14 @@ enum Capture {
         let formatter = DateFormatter()
         formatter.dateFormat = "d MMM HH:mm"
         p.name = "Captured \(formatter.string(from: Date()))"
+        p.files = openFiles()
+        if let name = Brave.captureFrontWindow() { p.braveWindowNames = [name] }
+        if let link = ClaudeApp.currentLink() { p.claudeLink = link }
+        return p
+    }
 
+    /// Documents open right now, as ~-abbreviated paths.
+    static func openFiles() -> [String] {
         var paths: [String] = []
         func add(_ path: String) {
             let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
@@ -142,11 +150,10 @@ enum Capture {
 
         // Word, Excel and PowerPoint, asked directly in case they don't report documents above.
         for path in Office.openDocumentPaths() { add(path) }
+        // Preview, asked directly so documents in background tabs are included too.
+        for path in Scripting.previewDocumentPaths() { add(path) }
 
-        p.files = paths
-        if let name = Brave.captureFrontWindow() { p.braveWindowName = name }
-        if let link = ClaudeApp.currentLink() { p.claudeLink = link }
-        return p
+        return paths
     }
 }
 
