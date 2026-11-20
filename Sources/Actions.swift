@@ -558,6 +558,7 @@ enum WindowCloser {
             return
         }
         let seen = Seen()
+        closeOfficeDocuments(files, seen)
         pressAll(files, seen, pass: "0s")
         for (i, delay) in retryDelays.enumerated() {
             let last = i == retryDelays.count - 1
@@ -596,6 +597,26 @@ enum WindowCloser {
                 Log.write(what + ": pressed close")
                 AX.pressClose(item.window)
                 seen.pressed.insert(item.path)
+            }
+        }
+    }
+
+    /// Word, Excel and PowerPoint documents are closed by asking the app itself, not by pressing
+    /// the window's close button: on some Macs Word closes the document after a press but leaves
+    /// its empty window stuck on screen. Marks them as handled so they aren't pressed too.
+    private static func closeOfficeDocuments(_ files: [String], _ seen: Seen) {
+        var byPath: [String: String] = [:]
+        for f in files { byPath[URL(fileURLWithPath: expandPath(f)).resolvingSymlinksInPath().path] = f }
+        let matches = Office.openDocuments().filter {
+            byPath[URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path] != nil
+        }
+        guard !matches.isEmpty else { return }
+        Log.write("  [0s] asking Office to close: \(matches.map(\.name))")
+        Office.close(matches)
+        for doc in matches {
+            if let f = byPath[URL(fileURLWithPath: doc.path).resolvingSymlinksInPath().path] {
+                seen.pressed.insert(f)
+                seen.paths.insert(f)
             }
         }
     }
