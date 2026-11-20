@@ -118,9 +118,12 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var openIDs: Set<UUID> = []
     /// Which project the editor window shows.
     @Published var editorSelection: UUID?
+    /// Set when GitHub has a newer version than this build.
+    @Published private(set) var updateAvailable = false
 
     private let fileURL: URL
     private var timer: Timer?
+    private var updateTimer: Timer?
 
     init() {
         let support = FileManager.default
@@ -133,6 +136,17 @@ final class ProjectStore: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.heartbeat() }
         }
+        // Look for updates shortly after launch, then every 4 hours.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            MainActor.assumeIsolated { self?.checkForUpdates() }
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 4 * 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkForUpdates() }
+        }
+    }
+
+    func checkForUpdates() {
+        Updater.checkForUpdates { [weak self] available in self?.updateAvailable = available }
     }
 
     // MARK: Open / close

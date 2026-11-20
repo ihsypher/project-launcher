@@ -44,7 +44,9 @@ struct MenuContent: View {
 
         Button("Edit Projects...") { EditorWindow.shared.show(store: store) }
             .keyboardShortcut(",")
-        Button("Update Project Launcher...") { Updater.run() }
+        Button(store.updateAvailable ? "Update Available: Install Now..." : "Update Project Launcher...") {
+            Updater.run()
+        }
 
         Divider()
 

@@ -275,6 +275,34 @@ enum Office {
 
 @MainActor
 enum Updater {
+    /// Whether GitHub has commits this build doesn't. Runs git in the background
+    /// (fetch only, so nothing local changes) and calls back on the main thread.
+    static func checkForUpdates(_ done: @escaping @MainActor (Bool) -> Void) {
+        guard let dir = Bundle.main.object(forInfoDictionaryKey: "PLSourceDir") as? String else { return }
+        DispatchQueue.global(qos: .utility).async {
+            let available = git(dir, ["fetch", "--quiet"]) != nil
+                && (Int(git(dir, ["rev-list", "--count", "HEAD..@{u}"]) ?? "") ?? 0) > 0
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(available) } }
+        }
+    }
+
+    /// Runs git in `dir`; returns its trimmed output, or nil if it failed.
+    nonisolated private static func git(_ dir: String, _ args: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", dir] + args
+        // Never stop to ask for a GitHub login.
+        process.environment = ProcessInfo.processInfo.environment.merging(["GIT_TERMINAL_PROMPT": "0"]) { $1 }
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Opens update.command (in the folder the app was built from) in Terminal.
     /// It pulls the latest code, rebuilds, and reinstalls.
     static func run() {
