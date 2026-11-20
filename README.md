@@ -5,6 +5,7 @@ A menu-bar app. One click opens a project's files, its Brave window and its Clau
 ## Menu
 
 - **Project names**: click to open (tick appears) or close. Shows the deadline countdown, plus time today while the project is open.
+- **Sub-projects**: a project can sit under another (e.g. Radiation › Assignment 1, Radiation › Assignment 2). A project with sub-projects shows as a submenu, with how many are open and the next deadline. If the parent has its own files, Brave window or Claude link, you can open it from the top of its submenu too.
 - **Save Window Layout of Open Projects**: remembers where each open project's windows are, for the screens you have connected right now.
 - **New Project from Open Windows**: makes a project from the documents and named Brave window you have open, with their current layout.
 - **Edit Projects...**: files, Claude link, Brave window, deadline, layouts and time spent.

@@ -16,6 +16,7 @@ xcrun -sdk macosx swiftc -parse-as-library -O \
   -o "$APP/Contents/MacOS/ProjectLauncher"
 
 cp Info.plist "$APP/Contents/Info.plist"
+cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Remember where the source lives, for the "Update Project Launcher..." menu item.
 plutil -insert PLSourceDir -string "$SRC" "$APP/Contents/Info.plist"
 

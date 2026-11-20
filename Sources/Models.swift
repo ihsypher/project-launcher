@@ -40,6 +40,8 @@ struct SavedFrame: Codable, Hashable {
 struct Project: Codable, Identifiable, Hashable {
     var id = UUID()
     var name: String = "New Project"
+    /// The project this one sits under in the tree (e.g. "Radiation" for "Assignment 1"). nil = top level.
+    var parentID: UUID? = nil
     /// Absolute paths (may start with ~). Each opens in its default app. May include .app bundles.
     var files: [String] = []
     /// Web pages to open in Brave if the named window doesn't exist yet.
@@ -62,7 +64,7 @@ struct Project: Codable, Identifiable, Hashable {
     var activeSession: ActiveSession? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, name, files, urls, braveWindowName, hideAppsOnClose, claudeLink, claudeOnClose
+        case id, name, parentID, files, urls, braveWindowName, hideAppsOnClose, claudeLink, claudeOnClose
         case deadline, layouts, timeLog, activeSession
     }
 }
@@ -74,6 +76,7 @@ extension Project {
         self.init()
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? "New Project"
+        parentID = try c.decodeIfPresent(UUID.self, forKey: .parentID)
         files = try c.decodeIfPresent([String].self, forKey: .files) ?? []
         urls = try c.decodeIfPresent([String].self, forKey: .urls) ?? []
         braveWindowName = try c.decodeIfPresent(String.self, forKey: .braveWindowName) ?? ""
@@ -84,6 +87,11 @@ extension Project {
         layouts = try c.decodeIfPresent([String: [SavedFrame]].self, forKey: .layouts) ?? [:]
         timeLog = try c.decodeIfPresent([WorkSession].self, forKey: .timeLog) ?? []
         activeSession = try c.decodeIfPresent(ActiveSession.self, forKey: .activeSession)
+    }
+
+    /// Whether opening this project does anything (a parent can be just a group).
+    var hasContent: Bool {
+        !files.isEmpty || !urls.isEmpty || !braveWindowName.isEmpty || !claudeLink.isEmpty
     }
 
     /// Time spent with the project open, optionally only counting from `since`.
@@ -248,16 +256,78 @@ final class ProjectStore: ObservableObject {
         EditorWindow.shared.show(store: self)
     }
 
+    // MARK: Tree
+
+    /// Direct sub-projects of `id`, in list order. nil gives the top level
+    /// (including any whose parent no longer exists).
+    func children(of id: UUID?) -> [Project] {
+        guard let id else {
+            let ids = Set(projects.map(\.id))
+            return projects.filter { p in
+                guard let parent = p.parentID else { return true }
+                return parent == p.id || !ids.contains(parent)
+            }
+        }
+        return projects.filter { $0.parentID == id && $0.id != id }
+    }
+
+    /// All sub-projects below `id`, at any depth.
+    func descendants(of id: UUID) -> [Project] {
+        var result: [Project] = []
+        var seen: Set<UUID> = [id]
+        var queue = [id]
+        while !queue.isEmpty {
+            for c in children(of: queue.removeFirst()) where seen.insert(c.id).inserted {
+                result.append(c)
+                queue.append(c.id)
+            }
+        }
+        return result
+    }
+
+    /// Every project in tree order with its depth, for indented lists.
+    func flattened() -> [(project: Project, depth: Int)] {
+        var result: [(Project, Int)] = []
+        var seen: Set<UUID> = []
+        func walk(_ parent: UUID?, _ depth: Int) {
+            for p in children(of: parent) where seen.insert(p.id).inserted {
+                result.append((p, depth))
+                walk(p.id, depth + 1)
+            }
+        }
+        walk(nil, 0)
+        return result
+    }
+
+    /// e.g. "Radiation › Assignment 1"
+    func path(of p: Project) -> String {
+        var names = [p.name]
+        var seen: Set<UUID> = [p.id]
+        var current = p.parentID
+        while let id = current, seen.insert(id).inserted,
+              let parent = projects.first(where: { $0.id == id }) {
+            names.insert(parent.name, at: 0)
+            current = parent.parentID
+        }
+        return names.joined(separator: " › ")
+    }
+
     // MARK: Editing
 
-    func addProject() -> UUID {
-        let p = Project(name: "New Project")
+    func addProject(parent: UUID? = nil) -> UUID {
+        var p = Project(name: parent == nil ? "New Project" : "New Sub-project")
+        p.parentID = parent
         projects.append(p)
         return p.id
     }
 
+    /// Sub-projects of a deleted project move up a level rather than being deleted.
     func delete(id: UUID) {
-        projects.removeAll { $0.id == id }
+        let parent = projects.first(where: { $0.id == id })?.parentID
+        var copy = projects
+        copy.removeAll { $0.id == id }
+        for i in copy.indices where copy[i].parentID == id { copy[i].parentID = parent }
+        projects = copy
         openIDs.remove(id)
     }
 

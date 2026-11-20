@@ -7,8 +7,10 @@ struct EditorView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $store.editorSelection) {
-                ForEach(store.projects) { p in
-                    Text(p.name).tag(p.id)
+                ForEach(store.flattened(), id: \.project.id) { item in
+                    Text(item.project.name)
+                        .padding(.leading, CGFloat(item.depth) * 14)
+                        .tag(item.project.id)
                 }
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 210)
@@ -20,13 +22,19 @@ struct EditorView: View {
                     .help("Add project")
 
                     Button {
+                        store.editorSelection = store.addProject(parent: store.editorSelection)
+                    } label: { Image(systemName: "plus.square.on.square") }
+                    .disabled(store.editorSelection == nil)
+                    .help("Add a sub-project under the selected project")
+
+                    Button {
                         if let id = store.editorSelection {
                             store.delete(id: id)
                             store.editorSelection = nil
                         }
                     } label: { Image(systemName: "minus") }
                     .disabled(store.editorSelection == nil)
-                    .help("Delete selected project")
+                    .help("Delete selected project (its sub-projects move up a level)")
 
                     Spacer()
                 }
@@ -58,6 +66,7 @@ struct EditorView: View {
 }
 
 struct ProjectDetail: View {
+    @EnvironmentObject var store: ProjectStore
     @Binding var project: Project
     @State private var newURL = ""
     @State private var braveNames: [String] = []
@@ -69,6 +78,12 @@ struct ProjectDetail: View {
         Form {
             Section("Project") {
                 TextField("Name", text: $project.name)
+                Picker("Part of", selection: $project.parentID) {
+                    Text("Nothing (top level)").tag(UUID?.none)
+                    ForEach(parentOptions) { p in
+                        Text(store.path(of: p)).tag(UUID?.some(p.id))
+                    }
+                }
                 Toggle("Deadline", isOn: hasDeadline)
                 if project.deadline != nil {
                     DatePicker("Due", selection: deadlineDate, displayedComponents: [.date, .hourAndMinute])
@@ -212,6 +227,10 @@ struct ProjectDetail: View {
                 LabeledContent("Today", value: formatDuration(project.timeSpent(since: Calendar.current.startOfDay(for: Date()))))
                 LabeledContent("Last 7 days", value: formatDuration(project.timeSpent(since: Date().addingTimeInterval(-7 * 24 * 3600))))
                 LabeledContent("Total", value: formatDuration(project.timeSpent()))
+                if !subProjects.isEmpty {
+                    LabeledContent("Total with sub-projects",
+                                   value: formatDuration(([project] + subProjects).reduce(0) { $0 + $1.timeSpent() }))
+                }
                 Button("Reset Time Log...", role: .destructive) { confirmReset = true }
             } header: {
                 Text("Time spent")
@@ -237,6 +256,14 @@ struct ProjectDetail: View {
         let saved = project.braveWindowName
         if !saved.isEmpty && !names.contains(saved) { names.insert(saved, at: 0) }
         return names
+    }
+
+    private var subProjects: [Project] { store.descendants(of: project.id) }
+
+    /// Anything except this project and those under it (which would make a loop).
+    private var parentOptions: [Project] {
+        let excluded = Set([project.id] + subProjects.map(\.id))
+        return store.flattened().map(\.project).filter { !excluded.contains($0.id) }
     }
 
     private var currentScreens: String { ScreenSetup.currentKey() }

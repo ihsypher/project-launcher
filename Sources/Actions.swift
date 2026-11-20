@@ -251,8 +251,9 @@ enum Brave {
         AppleScriptRunner.result(script)
     }
 
-    /// The front-most named Brave window that isn't minimised, for "New Project from Open Windows".
-    static func frontNamedWindow() -> String? {
+    /// The Brave window you're in (front-most, not minimised), for "New Project from Open Windows".
+    /// If it has no name yet, asks for one (suggesting the current tab's title) and names it in Brave.
+    static func captureFrontWindow() -> String? {
         guard isRunning else { return nil }
         let script = """
         tell application "\(appName)"
@@ -260,15 +261,36 @@ enum Brave {
                 try
                     if (minimized of w) is false then
                         set n to given name of w
-                        if n is not missing value and n is not "" then return n
+                        if n is missing value then set n to ""
+                        set t to ""
+                        try
+                            set t to title of active tab of w
+                        end try
+                        return {(id of w) as text, n, t}
                     end if
                 end try
             end repeat
         end tell
-        return ""
+        return {}
         """
-        guard let name = AppleScriptRunner.result(script)?.stringValue, !name.isEmpty else { return nil }
-        return name
+        guard let r = AppleScriptRunner.result(script), r.numberOfItems == 3,
+              let windowID = r.atIndex(1)?.stringValue else { return nil }
+        let given = r.atIndex(2)?.stringValue ?? ""
+        if !given.isEmpty { return given }
+
+        let tabTitle = r.atIndex(3)?.stringValue ?? ""
+        guard let name = Alerts.askText(
+            "Name this Brave window?",
+            "Your front Brave window has no name. Project Launcher finds the window by its name, so give it one to include it in the project.",
+            suggestion: tabTitle, okTitle: "Name Window", cancelTitle: "Skip Brave"
+        ) else { return nil }
+
+        let set = """
+        tell application "\(appName)"
+            set given name of (first window whose id is \(windowID)) to "\(escape(name))"
+        end tell
+        """
+        return AppleScriptRunner.run(set) ? name : nil
     }
 
     static func minimise(windowName: String) {
@@ -389,26 +411,27 @@ enum AX {
     }
 
     /// Windows showing any of the given files, each paired with the path as stored in the project.
+    /// Looks in every running app, since a file may be open in something other than its default app.
     static func documentWindows(files: [String]) -> [(path: String, window: AXUIElement)] {
-        // Work out which running app owns each file (the app it opens in by default).
-        var byPID: [pid_t: [(String, URL)]] = [:]
-        for path in files {
-            let url = URL(fileURLWithPath: expandPath(path)).resolvingSymlinksInPath()
-            guard let appURL = NSWorkspace.shared.urlForApplication(toOpen: url),
-                  let bundleID = Bundle(url: appURL)?.bundleIdentifier else { continue }
-            for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
-                byPID[app.processIdentifier, default: []].append((path, url))
-            }
-        }
+        let targets = files.map { ($0, URL(fileURLWithPath: expandPath($0)).resolvingSymlinksInPath()) }
         var result: [(path: String, window: AXUIElement)] = []
-        for (pid, targets) in byPID {
-            for w in windows(pid: pid) {
+        for app in NSWorkspace.shared.runningApplications
+        where app.activationPolicy == .regular && app.processIdentifier != getpid() {
+            for w in windows(pid: app.processIdentifier) {
                 if let path = matchingPath(w, targets) {
                     result.append((path: path, window: w))
                 }
             }
         }
         return result
+    }
+
+    /// True while a window shows a sheet, e.g. "Do you want to save changes?".
+    static func hasSheet(_ window: AXUIElement) -> Bool {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &value) == .success,
+              let children = value as? [AXUIElement] else { return false }
+        return children.contains { string($0, kAXRoleAttribute) == "AXSheet" }
     }
 
     /// Match by the window's document path (Preview, most Cocoa apps),
@@ -448,15 +471,49 @@ enum AX {
 
 @MainActor
 enum WindowCloser {
+    /// Seconds after the first try to look again. Apps can ignore a press while busy,
+    /// and closing one Preview tab brings the next one forward as a new window.
+    private static let retryDelays: [Double] = [0.7, 1.5, 3]
+
     static func close(files: [String]) {
         guard AX.ensureTrusted() else {
             Alerts.show("Accessibility permission needed",
                         "To close only this project's windows, allow Project Launcher in System Settings > Privacy & Security > Accessibility, then try again.")
             return
         }
-        for item in AX.documentWindows(files: files) {
-            AX.pressClose(item.window)
+        pressAll(files)
+        for (i, delay) in retryDelays.enumerated() {
+            let last = i == retryDelays.count - 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                MainActor.assumeIsolated {
+                    let seen = pressAll(files)
+                    if last { closeOfficeLeftovers(files, skipping: seen) }
+                }
+            }
         }
+    }
+
+    /// Presses close on each matching window, leaving alone any that are asking to save.
+    /// Returns the paths that still have a window.
+    @discardableResult
+    private static func pressAll(_ files: [String]) -> Set<String> {
+        var seen: Set<String> = []
+        for item in AX.documentWindows(files: files) {
+            seen.insert(item.path)
+            if !AX.hasSheet(item.window) { AX.pressClose(item.window) }
+        }
+        return seen
+    }
+
+    /// Word/Excel/PowerPoint documents still open that Accessibility couldn't see at all.
+    private static func closeOfficeLeftovers(_ files: [String], skipping seen: Set<String>) {
+        let wanted = Set(files.filter { !seen.contains($0) }.map {
+            URL(fileURLWithPath: expandPath($0)).resolvingSymlinksInPath().path
+        })
+        let leftovers = Office.openDocuments().filter {
+            wanted.contains(URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path)
+        }
+        if !leftovers.isEmpty { Office.close(leftovers) }
     }
 }
 
@@ -470,5 +527,23 @@ enum Alerts {
         alert.messageText = title
         alert.informativeText = message
         alert.runModal()
+    }
+
+    /// Asks for a line of text. Returns nil if cancelled or left empty.
+    static func askText(_ title: String, _ message: String, suggestion: String,
+                        okTitle: String, cancelTitle: String) -> String? {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: okTitle)
+        alert.addButton(withTitle: cancelTitle)
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = suggestion
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 }

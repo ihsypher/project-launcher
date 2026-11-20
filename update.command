@@ -24,6 +24,6 @@ fi
 
 rm -rf "/Applications/Project Launcher.app"
 cp -R "build/Project Launcher.app" /Applications/
-open "/Applications/Project Launcher.app"
+open "/Applications/Project Launcher.app" || { sleep 1; open "/Applications/Project Launcher.app"; }
 echo ""
 echo "Updated. You can close this window."

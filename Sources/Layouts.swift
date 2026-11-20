@@ -140,48 +140,90 @@ enum Capture {
         for path in Office.openDocumentPaths() { add(path) }
 
         p.files = paths
-        if let name = Brave.frontNamedWindow() { p.braveWindowName = name }
+        if let name = Brave.captureFrontWindow() { p.braveWindowName = name }
         return p
     }
 }
 
 @MainActor
 enum Office {
+    struct OpenDocument {
+        var appID: String
+        var collection: String
+        var path: String
+        var name: String
+    }
+
+    private static let apps: [(id: String, collection: String, element: String)] = [
+        ("com.microsoft.Word", "documents", "document"),
+        ("com.microsoft.Excel", "workbooks", "workbook"),
+        ("com.microsoft.Powerpoint", "presentations", "presentation"),
+    ]
+
     static func openDocumentPaths() -> [String] {
-        let apps: [(id: String, collection: String)] = [
-            ("com.microsoft.Word", "documents"),
-            ("com.microsoft.Excel", "workbooks"),
-            ("com.microsoft.Powerpoint", "presentations"),
-        ]
-        var out: [String] = []
+        openDocuments().map(\.path)
+    }
+
+    /// Documents open in Word, Excel and PowerPoint, asked over AppleScript.
+    /// Finds them even when Accessibility can't see the window (e.g. full screen in another Space).
+    static func openDocuments() -> [OpenDocument] {
+        var out: [OpenDocument] = []
         for app in apps where !NSRunningApplication.runningApplications(withBundleIdentifier: app.id).isEmpty {
             // Office returns old-style "Macintosh HD:Users:..." paths; convert outside the tell block.
             let script = """
+            set theFull to {}
             set theNames to {}
             tell application id "\(app.id)"
                 try
-                    set theNames to full name of \(app.collection)
+                    set theFull to full name of \(app.collection)
+                    set theNames to name of \(app.collection)
                 end try
             end tell
             set out to {}
-            repeat with n in theNames
-                set t to n as text
+            repeat with i from 1 to (count of theFull)
+                set t to (item i of theFull) as text
+                set p to ""
                 if t starts with "/" then
-                    set end of out to t
+                    set p to t
                 else if t contains ":" and t does not contain "://" then
                     try
-                        set end of out to POSIX path of t
+                        set p to POSIX path of t
                     end try
+                end if
+                if p is not "" and i ≤ (count of theNames) then
+                    set end of out to {p, (item i of theNames) as text}
                 end if
             end repeat
             return out
             """
             guard let r = AppleScriptRunner.result(script), r.numberOfItems > 0 else { continue }
             for i in 1...r.numberOfItems {
-                if let s = r.atIndex(i)?.stringValue { out.append(s) }
+                guard let pair = r.atIndex(i), pair.numberOfItems == 2,
+                      let path = pair.atIndex(1)?.stringValue,
+                      let name = pair.atIndex(2)?.stringValue else { continue }
+                out.append(OpenDocument(appID: app.id, collection: app.collection, path: path, name: name))
             }
         }
         return out
+    }
+
+    /// Asks Office to close these documents ("saving ask", so unsaved work still prompts).
+    /// Doesn't wait for a reply, so a save prompt can't freeze Project Launcher.
+    static func close(_ docs: [OpenDocument]) {
+        for doc in docs {
+            guard let element = apps.first(where: { $0.id == doc.appID })?.element else { continue }
+            let name = doc.name.replacingOccurrences(of: "\\", with: "\\\\")
+                               .replacingOccurrences(of: "\"", with: "\\\"")
+            AppleScriptRunner.result("""
+            ignoring application responses
+                tell application id "\(doc.appID)"
+                    try
+                        close \(element) "\(name)" saving ask
+                    end try
+                end tell
+            end ignoring
+            """)
+        }
     }
 }
 

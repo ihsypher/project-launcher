@@ -23,13 +23,9 @@ struct MenuContent: View {
         }
 
         // Each project is a toggle: a tick means it's open. Click to open/close.
-        ForEach(store.projects) { project in
-            Toggle(isOn: Binding(
-                get: { store.isOpen(project) },
-                set: { _ in store.toggle(project) }
-            )) {
-                Text(label(for: project))
-            }
+        // Projects with sub-projects become submenus.
+        ForEach(store.children(of: nil)) { project in
+            ProjectMenuItem(project: project)
         }
 
         Divider()
@@ -55,22 +51,69 @@ struct MenuContent: View {
         .keyboardShortcut("q")
     }
 
+}
+
+/// One project in the menu: a toggle, or a submenu if it has sub-projects.
+struct ProjectMenuItem: View {
+    @EnvironmentObject var store: ProjectStore
+    let project: Project
+
+    var body: some View {
+        let kids = store.children(of: project.id)
+        if kids.isEmpty {
+            toggle
+        } else {
+            Menu(groupLabel) {
+                // A parent with its own files etc. can be opened too (e.g. shared course notes).
+                if project.hasContent {
+                    toggle
+                    Divider()
+                }
+                ForEach(kids) { child in
+                    ProjectMenuItem(project: child)
+                }
+            }
+        }
+    }
+
+    private var toggle: some View {
+        Toggle(isOn: Binding(
+            get: { store.isOpen(project) },
+            set: { _ in store.toggle(project) }
+        )) {
+            Text(label)
+        }
+    }
+
     /// e.g. "ANIHC  (3 days left, 1h 20m today)"
-    private func label(for p: Project) -> String {
+    private var label: String {
         var extras: [String] = []
-        if let d = p.deadline { extras.append(deadlineText(d)) }
-        if store.isOpen(p) {
-            let today = p.timeSpent(since: Calendar.current.startOfDay(for: Date()))
+        if let d = project.deadline { extras.append(deadlineText(d)) }
+        if store.isOpen(project) {
+            let today = project.timeSpent(since: Calendar.current.startOfDay(for: Date()))
             extras.append("\(formatDuration(today)) today")
         }
-        return extras.isEmpty ? p.name : "\(p.name)  (\(extras.joined(separator: ", ")))"
+        return extras.isEmpty ? project.name : "\(project.name)  (\(extras.joined(separator: ", ")))"
+    }
+
+    /// e.g. "Radiation  (1 open, next: 3 days left)"
+    private var groupLabel: String {
+        let all = [project] + store.descendants(of: project.id)
+        var extras: [String] = []
+        let open = all.filter { store.isOpen($0) }.count
+        if open > 0 { extras.append("\(open) open") }
+        let today = Calendar.current.startOfDay(for: Date())
+        if let next = all.compactMap(\.deadline).filter({ $0 >= today }).min() {
+            extras.append("next: \(deadlineText(next))")
+        }
+        return extras.isEmpty ? project.name : "\(project.name)  (\(extras.joined(separator: ", ")))"
     }
 }
 
 /// Hosts the SwiftUI editor in a normal AppKit window, so it reliably comes
 /// to the front even though this is a menu-bar-only app.
 @MainActor
-final class EditorWindow: NSObject, NSWindowDelegate {
+final class EditorWindow: NSObject {
     static let shared = EditorWindow()
     private var window: NSWindow?
 
@@ -79,53 +122,41 @@ final class EditorWindow: NSObject, NSWindowDelegate {
             let root = EditorView()
                 .environmentObject(store)
                 .frame(minWidth: 680, minHeight: 440)
-            let w = NSWindow(contentViewController: NSHostingController(rootView: root))
+            let w = ShortcutWindow(contentViewController: NSHostingController(rootView: root))
             w.title = "Project Launcher"
             w.setContentSize(NSSize(width: 780, height: 520))
             w.isReleasedWhenClosed = false
-            w.delegate = self
             w.center()
             window = w
         }
-        // While editing, behave like a normal app (Dock icon, Cmd-Tab, menu bar)
-        // so Cmd-C / Cmd-V / Cmd-A work in the text fields.
-        NSApp.setActivationPolicy(.regular)
-        installEditMenu()
+        // Stays menu-bar only (no Dock icon) while editing.
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }
+}
 
-    func windowWillClose(_ notification: Notification) {
-        // Back to being menu-bar only.
-        NSApp.setActivationPolicy(.accessory)
-    }
-
-    /// Menu-bar-only apps have no Edit menu, and without one the standard
-    /// copy/paste shortcuts do nothing. Build a minimal menu bar.
-    private func installEditMenu() {
-        let main = NSMenu()
-
-        let appItem = NSMenuItem()
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit Project Launcher", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = appMenu
-        main.addItem(appItem)
-
-        let editItem = NSMenuItem()
-        let edit = NSMenu(title: "Edit")
-        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
-        redo.keyEquivalentModifierMask = [.command, .shift]
-        edit.addItem(.separator())
-        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = edit
-        main.addItem(editItem)
-
-        NSApp.mainMenu = main
+/// Menu-bar-only apps have no Edit menu, and without one the standard
+/// copy/paste shortcuts do nothing. This window handles them itself.
+final class ShortcutWindow: NSWindow {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard mods == .command || mods == [.command, .shift],
+              let key = event.charactersIgnoringModifiers?.lowercased() else {
+            return super.performKeyEquivalent(with: event)
+        }
+        let shift = mods.contains(.shift)
+        let action: Selector?
+        switch (key, shift) {
+        case ("x", false): action = #selector(NSText.cut(_:))
+        case ("c", false): action = #selector(NSText.copy(_:))
+        case ("v", false): action = #selector(NSText.paste(_:))
+        case ("a", false): action = #selector(NSText.selectAll(_:))
+        case ("z", false): action = Selector(("undo:"))
+        case ("z", true): action = Selector(("redo:"))
+        case ("w", false): performClose(nil); return true
+        default: action = nil
+        }
+        if let action, NSApp.sendAction(action, to: nil, from: self) { return true }
+        return super.performKeyEquivalent(with: event)
     }
 }
