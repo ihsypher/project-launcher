@@ -537,32 +537,51 @@ enum WindowCloser {
     /// and closing one Preview tab brings the next one forward as a new window.
     private static let retryDelays: [Double] = [0.7, 1.5, 3]
 
+    /// "Daniel Mode" in the menu (saved per Mac). Off: press close again on every look.
+    /// On: press each window only once per file, for Macs where Word is slow to close.
+    static let pressOnceKey = "pressCloseOnce"
+
     static func close(files: [String]) {
         guard AX.ensureTrusted() else {
             Alerts.show("Accessibility permission needed",
                         "To close only this project's windows, allow Project Launcher in System Settings > Privacy & Security > Accessibility, then try again.")
             return
         }
-        pressAll(files)
+        let pressed = Pressed()
+        pressAll(files, pressed)
         for (i, delay) in retryDelays.enumerated() {
             let last = i == retryDelays.count - 1
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 MainActor.assumeIsolated {
-                    let seen = pressAll(files)
+                    let seen = pressAll(files, pressed)
                     if last { closeOfficeLeftovers(files, skipping: seen) }
                 }
             }
         }
     }
 
+    /// Windows already told to close during one close, with the file each was showing.
+    private final class Pressed {
+        var items: [(window: AXUIElement, path: String)] = []
+        func contains(_ window: AXUIElement, _ path: String) -> Bool {
+            items.contains { CFEqual($0.window, window) && $0.path == path }
+        }
+    }
+
     /// Presses close on each matching window, leaving alone any that are asking to save.
+    /// In Daniel Mode, a window still showing the same file is only pressed once: Word can take
+    /// a few seconds to close a OneDrive file, and a second press mid-close leaves it half-closed.
+    /// (A Preview window that has moved on to its next tab shows a different file, so it's pressed.)
     /// Returns the paths that still have a window.
     @discardableResult
-    private static func pressAll(_ files: [String]) -> Set<String> {
+    private static func pressAll(_ files: [String], _ pressed: Pressed) -> Set<String> {
+        let once = UserDefaults.standard.bool(forKey: pressOnceKey)
         var seen: Set<String> = []
         for item in AX.documentWindows(files: files) {
             seen.insert(item.path)
-            if !AX.hasSheet(item.window) { AX.pressClose(item.window) }
+            if AX.hasSheet(item.window) || (once && pressed.contains(item.window, item.path)) { continue }
+            AX.pressClose(item.window)
+            pressed.items.append((item.window, item.path))
         }
         return seen
     }

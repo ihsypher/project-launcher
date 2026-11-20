@@ -20,6 +20,7 @@ struct LauncherApp: App {
 /// The drop-down menu shown when you click the menu-bar icon.
 struct MenuContent: View {
     @EnvironmentObject var store: ProjectStore
+    @AppStorage(WindowCloser.pressOnceKey) private var danielMode = false
 
     var body: some View {
         if store.projects.isEmpty {
@@ -39,6 +40,8 @@ struct MenuContent: View {
         Button("New Project from Open Windows") { store.captureNewProject() }
         Button("Close All Open Projects") { store.closeAll() }
             .disabled(store.openIDs.isEmpty)
+        Toggle("Daniel Mode", isOn: $danielMode)
+            .help("Presses each window's close button only once. Turn on if Word gets stuck half-closed.")
 
         Divider()
 

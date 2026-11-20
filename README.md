@@ -8,6 +8,7 @@ A menu-bar app. One click opens a project's files, its Brave window and its Clau
 - **Sub-projects**: a project can sit under another (e.g. Radiation › Assignment 1, Radiation › Assignment 2). A project with sub-projects shows as a submenu, with how many are open and the next deadline. If the parent has its own files, Brave window or Claude link, you can open it from the top of its submenu too.
 - **Save Window Layout of Open Projects**: remembers where each open project's windows are, for the screens you have connected right now.
 - **New Project from Open Windows**: makes a project from the documents and named Brave window you have open, with their current layout.
+- **Daniel Mode**: turn on if closing a project leaves Word stuck half-closed (greyed out, no document). Closing then presses each window's close button only once instead of retrying. Saved per Mac.
 - **Edit Projects...**: files, Claude link, Brave window, deadline, layouts and time spent.
 - **Update Project Launcher...**: pulls the latest version from GitHub, rebuilds and reinstalls.
 
