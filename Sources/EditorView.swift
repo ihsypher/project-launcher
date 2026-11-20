@@ -252,7 +252,7 @@ struct GroupDetail: View {
                         .frame(width: 48, height: 48)
                         .overlay(Image(systemName: "folder.fill").font(.system(size: 22)).foregroundStyle(.secondary))
                     VStack(alignment: .leading, spacing: 3) {
-                        TextField("Group name", text: $group.name)
+                        TextField("Group", text: $group.name)
                             .textFieldStyle(.plain)
                             .font(.title2.weight(.semibold))
                             .focused($nameFocused)
@@ -359,13 +359,15 @@ struct ProjectDetail: View {
                         IconPicker(icon: $project.icon, color: $project.color)
                     }
                     VStack(alignment: .leading, spacing: 3) {
-                        TextField("Project name", text: $project.name)
+                        TextField("Project", text: $project.name)
                             .textFieldStyle(.plain)
                             .font(.title2.weight(.semibold))
                             .focused($nameFocused)
-                        Text(subtitle)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        if !subtitle.isEmpty {
+                            Text(subtitle)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 .padding(.vertical, 4)
@@ -584,12 +586,13 @@ struct ProjectDetail: View {
         }
     }
 
-    /// e.g. "Radiation · Open · 1h 20m today · due in 3 days"
+    /// e.g. "Radiation · Open now · 1h 20m today · due in 3 days"
     private var subtitle: String {
         var parts: [String] = []
         if let g = store.group(of: project) { parts.append(g.name) }
-        let open = store.projects.first(where: { $0.id == project.id }).map(store.isOpen) ?? false
-        parts.append(open ? "Open" : "Closed")
+        if store.projects.first(where: { $0.id == project.id }).map(store.isOpen) == true {
+            parts.append("Open now")
+        }
         let today = project.timeSpent(since: Calendar.current.startOfDay(for: Date()))
         if today >= 60 { parts.append("\(formatDuration(today)) today") }
         if let d = project.deadline { parts.append(deadlineText(d)) }
