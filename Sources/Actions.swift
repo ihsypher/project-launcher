@@ -570,21 +570,18 @@ enum WindowCloser {
         }
     }
 
-    /// What happened during one close: which windows were pressed (and showing which file),
+    /// What happened during one close: which files have had their window's close button pressed,
     /// and every file that had a visible window at any point.
     private final class Seen {
-        var pressed: [(window: AXUIElement, path: String)] = []
+        var pressed: Set<String> = []
         var paths: Set<String> = []
-
-        func wasPressed(_ window: AXUIElement, _ path: String) -> Bool {
-            pressed.contains { CFEqual($0.window, window) && $0.path == path }
-        }
     }
 
     /// Presses close on each matching window, leaving alone any that are asking to save.
-    /// A window still showing the same file is only pressed once: Word can take a few seconds
-    /// to close a OneDrive file, and pressing again mid-close brings it back.
-    /// (A Preview window that has moved on to its next tab shows a different file, so it's pressed.)
+    /// Each file is only pressed once. Word can take a few seconds to close a OneDrive file,
+    /// leaving its window up meanwhile, and pressing that window again brings it back.
+    /// (Checked by file, not window: Word hands out a new window reference each time.
+    /// Closing one Preview tab brings the next one, a different file, forward to be pressed.)
     private static func pressAll(_ files: [String], _ seen: Seen, pass: String) {
         let found = AX.documentWindows(files: files)
         if found.isEmpty { Log.write("  [\(pass)] no matching windows") }
@@ -593,12 +590,12 @@ enum WindowCloser {
             let what = "  [\(pass)] \(AX.describe(item.window)) for \((item.path as NSString).lastPathComponent)"
             if AX.hasSheet(item.window) {
                 Log.write(what + ": skipped, showing a sheet")
-            } else if seen.wasPressed(item.window, item.path) {
+            } else if seen.pressed.contains(item.path) {
                 Log.write(what + ": skipped, already pressed")
             } else {
                 Log.write(what + ": pressed close")
                 AX.pressClose(item.window)
-                seen.pressed.append((item.window, item.path))
+                seen.pressed.insert(item.path)
             }
         }
     }
