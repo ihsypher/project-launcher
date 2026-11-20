@@ -128,9 +128,12 @@ enum Capture {
             where app.activationPolicy == .regular && !app.isHidden {
                 guard let id = app.bundleIdentifier, !skip.contains(id) else { continue }
                 for w in AX.windows(pid: app.processIdentifier) where !AX.isMinimized(w) {
-                    if let doc = AX.string(w, kAXDocumentAttribute),
-                       let url = URL(string: doc), url.isFileURL {
-                        add(url.path)
+                    if let doc = AX.string(w, kAXDocumentAttribute) {
+                        if let url = URL(string: doc), url.isFileURL {
+                            add(url.path)
+                        } else if let local = OneDrive.localPath(for: doc) {
+                            add(local)
+                        }
                     }
                 }
             }
@@ -141,7 +144,44 @@ enum Capture {
 
         p.files = paths
         if let name = Brave.captureFrontWindow() { p.braveWindowName = name }
+        if let link = ClaudeApp.currentLink() { p.claudeLink = link }
         return p
+    }
+}
+
+/// Word, Excel and PowerPoint report OneDrive and SharePoint files as web addresses
+/// ("https://...sharepoint.com/personal/.../Documents/Folder/File.docx").
+/// This finds the synced copy under ~/Library/CloudStorage/OneDrive-....
+enum OneDrive {
+    static func localPath(for address: String) -> String? {
+        let decoded = address.removingPercentEncoding ?? address
+        let lower = decoded.lowercased()
+        guard lower.hasPrefix("https://"),
+              lower.contains("sharepoint.com") || lower.contains("onedrive"),
+              let range = decoded.range(of: "Documents/") else { return nil }
+        let relative = String(decoded[range.upperBound...])
+        guard !relative.isEmpty else { return nil }
+
+        let storage = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/CloudStorage", isDirectory: true)
+        let fm = FileManager.default
+        // Current folders before dated leftovers like "OneDrive-School (15-09-2026 11:29 am)".
+        let roots = ((try? fm.contentsOfDirectory(atPath: storage.path)) ?? [])
+            .filter { $0.hasPrefix("OneDrive") }
+            .sorted { a, b in
+                let aDated = a.contains(" ("), bDated = b.contains(" (")
+                return aDated == bDated ? a < b : !aDated
+            }
+        for root in roots {
+            let base = storage.appendingPathComponent(root, isDirectory: true)
+            var candidates = [base.appendingPathComponent(relative)]
+            // Shared libraries sit one folder deeper (one per site).
+            for library in (try? fm.contentsOfDirectory(atPath: base.path)) ?? [] {
+                candidates.append(base.appendingPathComponent(library).appendingPathComponent(relative))
+            }
+            if let hit = candidates.first(where: { fm.fileExists(atPath: $0.path) }) { return hit.path }
+        }
+        return nil
     }
 }
 
@@ -183,9 +223,9 @@ enum Office {
             repeat with i from 1 to (count of theFull)
                 set t to (item i of theFull) as text
                 set p to ""
-                if t starts with "/" then
+                if t starts with "/" or t contains "://" then
                     set p to t
-                else if t contains ":" and t does not contain "://" then
+                else if t contains ":" then
                     try
                         set p to POSIX path of t
                     end try
@@ -199,8 +239,12 @@ enum Office {
             guard let r = AppleScriptRunner.result(script), r.numberOfItems > 0 else { continue }
             for i in 1...r.numberOfItems {
                 guard let pair = r.atIndex(i), pair.numberOfItems == 2,
-                      let path = pair.atIndex(1)?.stringValue,
+                      var path = pair.atIndex(1)?.stringValue,
                       let name = pair.atIndex(2)?.stringValue else { continue }
+                if path.contains("://") {
+                    guard let local = OneDrive.localPath(for: path) else { continue }
+                    path = local
+                }
                 out.append(OpenDocument(appID: app.id, collection: app.collection, path: path, name: name))
             }
         }

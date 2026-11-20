@@ -241,9 +241,9 @@ final class ProjectStore: ObservableObject {
 
     func captureNewProject() {
         var p = Capture.currentProject()
-        if p.files.isEmpty && p.braveWindowName.isEmpty {
+        if p.files.isEmpty && p.braveWindowName.isEmpty && p.claudeLink.isEmpty {
             Alerts.show("Nothing to capture",
-                        "Open the files and Brave window you want first, then try again. Project Launcher also needs Accessibility permission (System Settings > Privacy & Security > Accessibility) to see your open windows.")
+                        "Open the files, Brave window and Claude chat you want first, then try again. Project Launcher also needs Accessibility permission (System Settings > Privacy & Security > Accessibility) to see your open windows.")
             return
         }
         let frames = Layouts.capture(p)

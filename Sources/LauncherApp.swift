@@ -5,6 +5,10 @@ import AppKit
 struct LauncherApp: App {
     @StateObject private var store = ProjectStore()
 
+    init() {
+        MainActor.assumeIsolated { ClaudeApp.prepareAccessibility() }
+    }
+
     var body: some Scene {
         MenuBarExtra("Project Launcher", systemImage: "square.stack.3d.up") {
             MenuContent()

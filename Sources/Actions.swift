@@ -92,6 +92,43 @@ enum ClaudeApp {
         return Bundle(url: appURL)?.bundleIdentifier
     }
 
+    /// The chat or project open in the Claude app, e.g. "https://claude.ai/chat/<id>",
+    /// read from its window through Accessibility. nil if Claude isn't open or is on another page.
+    static func currentLink() -> String? {
+        guard let id = bundleID(),
+              let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first,
+              AX.ensureTrusted(prompt: false) else { return nil }
+        prepareAccessibility()
+        // The first time, Claude can take a couple of seconds to build its tree.
+        for attempt in 0..<12 {
+            if attempt > 0 { Thread.sleep(forTimeInterval: 0.25) }
+            for window in AX.windows(pid: app.processIdentifier) where !AX.isMinimized(window) {
+                for url in AX.webAreaURLs(in: window) {
+                    if let link = chatLink(from: url) { return link }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Claude is an Electron app: it only exposes its pages to Accessibility once asked to.
+    /// Called at launch too, so capture is quick later.
+    static func prepareAccessibility() {
+        guard let id = bundleID(), AX.ensureTrusted(prompt: false) else { return }
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: id) {
+            let element = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetAttributeValue(element, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        }
+    }
+
+    /// Keeps only claude.ai chat and project pages, without any "?..." or "#..." on the end.
+    private static func chatLink(from url: URL) -> String? {
+        guard let host = url.host?.lowercased(), host == "claude.ai" || host.hasSuffix(".claude.ai") else { return nil }
+        let parts = url.path.split(separator: "/")
+        guard parts.count >= 2, ["chat", "project"].contains(parts[0].lowercased()) else { return nil }
+        return "https://claude.ai/\(parts[0])/\(parts[1])"
+    }
+
     static func mainWindow() -> AXUIElement? {
         guard let id = bundleID() else { return nil }
         return AX.firstWindow(bundleID: id)
@@ -424,6 +461,31 @@ enum AX {
             }
         }
         return result
+    }
+
+    /// Addresses of the web pages inside a window (for Electron apps such as Claude).
+    static func webAreaURLs(in window: AXUIElement) -> [URL] {
+        var urls: [URL] = []
+        var queue: [(AXUIElement, Int)] = [(window, 0)]
+        var visited = 0
+        while !queue.isEmpty, visited < 4000 {
+            let (element, depth) = queue.removeFirst()
+            visited += 1
+            if string(element, kAXRoleAttribute) == "AXWebArea" {
+                var value: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &value) == .success,
+                   let url = value as? URL {
+                    urls.append(url)
+                }
+            }
+            guard depth < 30 else { continue }
+            var children: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+               let list = children as? [AXUIElement] {
+                queue.append(contentsOf: list.map { ($0, depth + 1) })
+            }
+        }
+        return urls
     }
 
     /// True while a window shows a sheet, e.g. "Do you want to save changes?".
