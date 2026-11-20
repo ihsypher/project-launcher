@@ -80,8 +80,21 @@ struct SettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             Form {
-                Section("Settings") {
-                    Text("Nothing here yet.").foregroundStyle(.secondary)
+                Section {
+                    HStack {
+                        Button("Show Log") {
+                            if !FileManager.default.fileExists(atPath: Log.url.path) {
+                                Log.write("Log started")
+                            }
+                            NSWorkspace.shared.activateFileViewerSelecting([Log.url])
+                        }
+                        Button("Clear Log") { Log.clear() }
+                        Spacer()
+                    }
+                } header: {
+                    Text("Troubleshooting")
+                } footer: {
+                    Text("The log records what opening and closing projects did (which windows were found, closed or skipped). Send the file if something goes wrong.")
                 }
             }
             .formStyle(.grouped)
@@ -92,7 +105,7 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 420, height: 260)
+        .frame(width: 440, height: 300)
     }
 }
 

@@ -65,6 +65,7 @@ enum Layouts {
         if !fileFrames.isEmpty {
             for item in AX.documentWindows(files: fileFrames.map { $0.key }) {
                 if let f = fileFrames.first(where: { $0.key == item.path }) {
+                    Log.write("  [layout] move \(AX.describe(item.window))")
                     AX.setFrame(item.window, f.rect)
                 }
             }

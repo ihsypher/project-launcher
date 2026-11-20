@@ -6,6 +6,7 @@ import ApplicationServices
 @MainActor
 enum Launcher {
     static func open(_ p: Project) {
+        Log.write("OPEN \(p.name): files=\(p.files) brave=\(p.braveWindowName) claude=\(p.claudeLink)")
         var missing: [String] = []
         for path in p.files {
             let full = expandPath(path)
@@ -29,6 +30,7 @@ enum Launcher {
     }
 
     static func close(_ p: Project) {
+        Log.write("CLOSE \(p.name): files=\(p.files)")
         // Close ONLY this project's document windows. Apps stay running,
         // so other modules' files in Word/Excel/Preview are untouched.
         let docs = p.files.filter { !isApp($0) }
@@ -40,8 +42,10 @@ enum Launcher {
             guard let bundleID = Bundle(url: URL(fileURLWithPath: expandPath(path)))?.bundleIdentifier else { continue }
             for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
                 if p.hideAppsOnClose.contains(path) {
+                    Log.write("  hide app \(app.localizedName ?? bundleID)")
                     app.hide()
                 } else {
+                    Log.write("  quit app \(app.localizedName ?? bundleID)")
                     app.terminate()
                 }
             }
@@ -136,6 +140,7 @@ enum ClaudeApp {
 
     static func close(mode: String) {
         guard mode != "leave", let bundleID = bundleID() else { return }
+        Log.write("  \(mode) Claude")
         for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
             if mode == "quit" { app.terminate() } else { app.hide() }
         }
@@ -331,6 +336,7 @@ enum Brave {
     }
 
     static func minimise(windowName: String) {
+        Log.write("  minimise Brave window \(windowName)")
         let script = """
         if application "\(appName)" is running then
             tell application "\(appName)"
@@ -488,6 +494,14 @@ enum AX {
         return urls
     }
 
+    /// e.g. "Microsoft Word 'Interim Report'", for the log.
+    static func describe(_ window: AXUIElement) -> String {
+        var pid: pid_t = 0
+        AXUIElementGetPid(window, &pid)
+        let app = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
+        return "\(app) '\(string(window, kAXTitleAttribute) ?? "")'"
+    }
+
     /// True while a window shows a sheet, e.g. "Do you want to save changes?".
     static func hasSheet(_ window: AXUIElement) -> Bool {
         var value: CFTypeRef?
@@ -544,12 +558,12 @@ enum WindowCloser {
             return
         }
         let seen = Seen()
-        pressAll(files, seen)
+        pressAll(files, seen, pass: "0s")
         for (i, delay) in retryDelays.enumerated() {
             let last = i == retryDelays.count - 1
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 MainActor.assumeIsolated {
-                    pressAll(files, seen)
+                    pressAll(files, seen, pass: "\(delay)s")
                     if last { closeOfficeLeftovers(files, skipping: seen.paths) }
                 }
             }
@@ -571,12 +585,21 @@ enum WindowCloser {
     /// A window still showing the same file is only pressed once: Word can take a few seconds
     /// to close a OneDrive file, and pressing again mid-close brings it back.
     /// (A Preview window that has moved on to its next tab shows a different file, so it's pressed.)
-    private static func pressAll(_ files: [String], _ seen: Seen) {
-        for item in AX.documentWindows(files: files) {
+    private static func pressAll(_ files: [String], _ seen: Seen, pass: String) {
+        let found = AX.documentWindows(files: files)
+        if found.isEmpty { Log.write("  [\(pass)] no matching windows") }
+        for item in found {
             seen.paths.insert(item.path)
-            if AX.hasSheet(item.window) || seen.wasPressed(item.window, item.path) { continue }
-            AX.pressClose(item.window)
-            seen.pressed.append((item.window, item.path))
+            let what = "  [\(pass)] \(AX.describe(item.window)) for \((item.path as NSString).lastPathComponent)"
+            if AX.hasSheet(item.window) {
+                Log.write(what + ": skipped, showing a sheet")
+            } else if seen.wasPressed(item.window, item.path) {
+                Log.write(what + ": skipped, already pressed")
+            } else {
+                Log.write(what + ": pressed close")
+                AX.pressClose(item.window)
+                seen.pressed.append((item.window, item.path))
+            }
         }
     }
 
@@ -588,10 +611,53 @@ enum WindowCloser {
         let wanted = Set(files.filter { !seen.contains($0) }.map {
             URL(fileURLWithPath: expandPath($0)).resolvingSymlinksInPath().path
         })
-        let leftovers = Office.openDocuments().filter {
+        let open = Office.openDocuments()
+        Log.write("  [office] open in Office: \(open.map(\.name)); already handled: \(seen.map { ($0 as NSString).lastPathComponent })")
+        let leftovers = open.filter {
             wanted.contains(URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path)
         }
-        if !leftovers.isEmpty { Office.close(leftovers) }
+        if !leftovers.isEmpty {
+            Log.write("  [office] closing via AppleScript: \(leftovers.map(\.name))")
+            Office.close(leftovers)
+        }
+    }
+}
+
+// MARK: - Log (~/Library/Logs/ProjectLauncher.log)
+
+/// A plain-text record of what opening and closing did, for tracking down problems.
+@MainActor
+enum Log {
+    static let url = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/ProjectLauncher.log")
+
+    private static let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return f
+    }()
+
+    static func write(_ message: String) {
+        let line = "\(formatter.string(from: Date()))  \(message)\n"
+        let fm = FileManager.default
+        // Keep it small: start afresh after 1 MB, keeping the previous one.
+        if let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int, size > 1_000_000 {
+            let old = url.deletingPathExtension().appendingPathExtension("old.log")
+            try? fm.removeItem(at: old)
+            try? fm.moveItem(at: url, to: old)
+        }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            try? handle.close()
+        } else {
+            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(line.utf8).write(to: url)
+        }
+    }
+
+    static func clear() {
+        try? FileManager.default.removeItem(at: url)
     }
 }
 
