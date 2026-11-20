@@ -3,6 +3,7 @@ import AppKit
 
 struct EditorView: View {
     @EnvironmentObject var store: ProjectStore
+    @State private var showSettings = false
 
     var body: some View {
         NavigationSplitView {
@@ -37,6 +38,11 @@ struct EditorView: View {
                     .help("Delete selected project (its sub-projects move up a level)")
 
                     Spacer()
+
+                    Button {
+                        showSettings = true
+                    } label: { Image(systemName: "gearshape") }
+                    .help("Settings")
                 }
                 .buttonStyle(.borderless)
                 .padding(8)
@@ -50,6 +56,9 @@ struct EditorView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+        }
     }
 
     /// Binding by id (safe if the project is deleted while shown).
@@ -62,6 +71,28 @@ struct EditorView: View {
                 }
             }
         )
+    }
+}
+
+struct SettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                Section("Settings") {
+                    Text("Nothing here yet.").foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(width: 420, height: 260)
     }
 }
 

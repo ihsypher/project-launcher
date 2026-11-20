@@ -537,56 +537,42 @@ enum WindowCloser {
     /// and closing one Preview tab brings the next one forward as a new window.
     private static let retryDelays: [Double] = [0.7, 1.5, 3]
 
-    /// "Daniel Mode" in the menu (saved per Mac). Off: press close again on every look.
-    /// On: press each window only once per file, for Macs where Word is slow to close.
-    static let pressOnceKey = "pressCloseOnce"
-
     static func close(files: [String]) {
         guard AX.ensureTrusted() else {
             Alerts.show("Accessibility permission needed",
                         "To close only this project's windows, allow Project Launcher in System Settings > Privacy & Security > Accessibility, then try again.")
             return
         }
-        let pressed = Pressed()
-        pressAll(files, pressed)
+        let seen = Seen()
+        pressAll(files, seen)
         for (i, delay) in retryDelays.enumerated() {
             let last = i == retryDelays.count - 1
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 MainActor.assumeIsolated {
-                    let seen = pressAll(files, pressed)
-                    if last { closeOfficeLeftovers(files, skipping: seen) }
+                    pressAll(files, seen)
+                    if last { closeOfficeLeftovers(files, skipping: seen.paths) }
                 }
             }
         }
     }
 
-    /// Windows already told to close during one close, with the file each was showing.
-    private final class Pressed {
-        var items: [(window: AXUIElement, path: String)] = []
-        func contains(_ window: AXUIElement, _ path: String) -> Bool {
-            items.contains { CFEqual($0.window, window) && $0.path == path }
-        }
+    /// Every file that had a visible window at any point during one close.
+    private final class Seen {
+        var paths: Set<String> = []
     }
 
     /// Presses close on each matching window, leaving alone any that are asking to save.
-    /// In Daniel Mode, a window still showing the same file is only pressed once: Word can take
-    /// a few seconds to close a OneDrive file, and a second press mid-close leaves it half-closed.
-    /// (A Preview window that has moved on to its next tab shows a different file, so it's pressed.)
-    /// Returns the paths that still have a window.
-    @discardableResult
-    private static func pressAll(_ files: [String], _ pressed: Pressed) -> Set<String> {
-        let once = UserDefaults.standard.bool(forKey: pressOnceKey)
-        var seen: Set<String> = []
+    private static func pressAll(_ files: [String], _ seen: Seen) {
         for item in AX.documentWindows(files: files) {
-            seen.insert(item.path)
-            if AX.hasSheet(item.window) || (once && pressed.contains(item.window, item.path)) { continue }
-            AX.pressClose(item.window)
-            pressed.items.append((item.window, item.path))
+            seen.paths.insert(item.path)
+            if !AX.hasSheet(item.window) { AX.pressClose(item.window) }
         }
-        return seen
     }
 
-    /// Word/Excel/PowerPoint documents still open that Accessibility couldn't see at all.
+    /// Word/Excel/PowerPoint documents still open that never had a visible window during this close
+    /// (e.g. full screen in another Space). Documents whose window already closed are skipped:
+    /// Office can keep listing a OneDrive file while it uploads, and closing it again
+    /// brings the window back blank.
     private static func closeOfficeLeftovers(_ files: [String], skipping seen: Set<String>) {
         let wanted = Set(files.filter { !seen.contains($0) }.map {
             URL(fileURLWithPath: expandPath($0)).resolvingSymlinksInPath().path
