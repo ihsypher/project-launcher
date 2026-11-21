@@ -116,15 +116,16 @@ struct EditorView: View {
                         .disabled(p.groupID == g.id)
                 }
                 Divider()
-                Button("New Group...") {
+                Button("New Group…") {
                     let g = store.addGroup()
                     store.moveProject(p.id, toGroup: g)
                     store.editorSelection = g
                 }
             }
             Divider()
+            Button("Duplicate") { store.editorSelection = store.duplicate(p.id) }
             Button(p.archived ? "Unarchive" : "Archive") { store.setArchived(p.id, !p.archived) }
-            Button("Delete Project...", role: .destructive) { pendingDelete = p.id }
+            Button("Delete Project…", role: .destructive) { pendingDelete = p.id }
         }
     }
 
@@ -149,7 +150,7 @@ struct EditorView: View {
             Button("Move Group Down") { store.moveGroup(g.id, by: 1) }
                 .disabled(index == store.groups.count - 1)
             Divider()
-            Button("Delete Group...", role: .destructive) { pendingDelete = g.id }
+            Button("Delete Group…", role: .destructive) { pendingDelete = g.id }
         }
     }
 
@@ -295,7 +296,7 @@ struct GroupDetail: View {
             } header: {
                 Label("Projects", systemImage: "square.stack")
             } footer: {
-                Text("Add a project with + while this group is selected, or right-click a project and choose Move to Group. Drag projects to reorder them.")
+                Text("Press + with the group selected, or right-click a project > Move to Group.")
             }
 
             Section {
@@ -318,6 +319,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(ProjectStore.closeOthersKey) private var closeOthers = true
     @AppStorage(RaycastScripts.enabledKey) private var raycast = true
+    @AppStorage(ProjectStore.idleMinutesKey) private var idleMinutes = 10
     @EnvironmentObject var store: ProjectStore
     @State private var openAtLogin = LoginItem.isEnabled
 
@@ -326,6 +328,10 @@ struct SettingsView: View {
             Form {
                 Section {
                     Toggle("Close other projects when opening one", isOn: $closeOthers)
+                    Picker("Pause time when away for", selection: $idleMinutes) {
+                        Text("Never").tag(0)
+                        ForEach([5, 10, 15, 30], id: \.self) { Text("\($0) minutes").tag($0) }
+                    }
                     Toggle("Open Project Launcher at login", isOn: Binding(
                         get: { openAtLogin },
                         set: { LoginItem.set($0); openAtLogin = LoginItem.isEnabled }
@@ -333,7 +339,7 @@ struct SettingsView: View {
                 } header: {
                     Label("General", systemImage: "gearshape")
                 } footer: {
-                    Text("Each project starts fresh. Hold Option while opening a project to keep the others open. Anything both projects use (an app, file or Brave window) is left alone.")
+                    Text("Hold Option when opening a project to keep the others open. Time stops counting while you're away and restarts when you're back.")
                 }
 
                 Section {
@@ -357,7 +363,7 @@ struct SettingsView: View {
                 } header: {
                     Label("Raycast", systemImage: "magnifyingglass")
                 } footer: {
-                    Text("Makes a Raycast command for each project, so you can search for it and open or close it. One-time setup: in Raycast, Settings > Extensions > + > Add Script Directory, and choose this folder (press Cmd-Shift-G and paste the copied path).")
+                    Text("Search any project in Raycast to open or close it. Setup once: Raycast Settings > Extensions > + > Add Script Directory, then Cmd-Shift-G and paste the path.")
                 }
 
                 Section {
@@ -374,7 +380,7 @@ struct SettingsView: View {
                 } header: {
                     Label("Troubleshooting", systemImage: "stethoscope")
                 } footer: {
-                    Text("The log records what opening and closing projects did (which windows were found, closed or skipped). Send the file if something goes wrong.")
+                    Text("A record of what each open and close did. Useful if something goes wrong.")
                 }
             }
             .formStyle(.grouped)
@@ -398,6 +404,7 @@ struct ProjectDetail: View {
     @State private var layoutMessage: String?
     @State private var confirmReset = false
     @State private var showIconPicker = false
+    @AppStorage("showAdvanced") private var showAdvanced = false
     @FocusState private var nameFocused: Bool
 
     var body: some View {
@@ -438,7 +445,7 @@ struct ProjectDetail: View {
                     get: { project.archived },
                     set: { store.setArchived(project.id, $0) }
                 ))
-                .help("Finished with it: hidden from the menu and Raycast, but its time still counts")
+                .help("Hidden from the menu and Raycast. Time still counts.")
                 Toggle("Deadline", isOn: hasDeadline)
                 if project.deadline != nil {
                     DatePicker("Due", selection: deadlineDate, displayedComponents: [.date, .hourAndMinute])
@@ -458,7 +465,7 @@ struct ProjectDetail: View {
                         Text((path as NSString).lastPathComponent)
                         if !FileManager.default.fileExists(atPath: expandPath(path)) {
                             Text("missing").font(.caption).foregroundStyle(.red)
-                            Button("Find...") { relink(path) }
+                            Button("Find…") { relink(path) }
                                 .controlSize(.small)
                                 .help("Find where this file has moved to")
                         }
@@ -472,7 +479,7 @@ struct ProjectDetail: View {
                             .labelsHidden()
                             .fixedSize()
                             .help(closesWholeApp(path)
-                                  ? "\(appName(for: path)) can't close one file, so closing the project quits or hides it (unless another open project uses it)"
+                                  ? "\(appName(for: path)) can't close one file, so it quits or hides instead"
                                   : "What happens to this app when you close the project")
                         } else if isOfficeDocument(path) {
                             Picker("On close", selection: officeCloseMode(for: path)) {
@@ -482,7 +489,7 @@ struct ProjectDetail: View {
                             .pickerStyle(.segmented)
                             .labelsHidden()
                             .fixedSize()
-                            .help("Close just this file, or quit the whole app too (unless another open project uses it). Quitting asks about any other unsaved documents.")
+                            .help("Close just this file, or quit the app too (unless another open project uses it)")
                         }
                         Button {
                             project.files.removeAll { $0 == path }
@@ -494,21 +501,21 @@ struct ProjectDetail: View {
                     .help(path)
                 }
                 HStack {
-                    Button("Add Files...", action: addFiles)
-                    Button("Add Open Windows...") { store.updateFromOpenWindows(project.id) }
-                        .help("Add documents that are open right now, and save the window layout")
+                    Button("Add Files…", action: addFiles)
+                    Button("Add What's Open…") { store.updateFromOpenWindows(project.id) }
+                        .help("Add documents open right now and save the layout")
                 }
             } header: {
                 Label("Files", systemImage: "doc.on.doc")
             } footer: {
-                Text("Files open in their default app (PDF in Preview, .docx in Word, .xlsx in Excel), and closing the project closes only those windows. You can add apps too (e.g. Claude from Applications): closing the project quits them, or hides them if you choose Hide. MATLAB can't close a single file, so a project with MATLAB files quits or hides MATLAB instead. Apps another open project still uses are left running.")
+                Text("Drag files here, or use Add Files. They open in their usual app and close with the project. Apps (and MATLAB, which can't close one file) quit or hide instead.")
             }
 
             Section {
                 TextField("https://claude.ai/chat/...", text: $project.claudeLink)
                 if !project.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty
                     && ClaudeApp.deepLink(from: project.claudeLink) == nil {
-                    Text("Paste a claude.ai chat or project link.")
+                    Text("This doesn't look like a claude.ai chat or project link.")
                         .font(.caption).foregroundStyle(.red)
                 }
                 Picker("When the project closes", selection: $project.claudeOnClose) {
@@ -519,7 +526,7 @@ struct ProjectDetail: View {
             } header: {
                 Label("Claude chat or project (optional)", systemImage: "bubble.left.and.bubble.right")
             } footer: {
-                Text("Open the chat or project at claude.ai in Brave, copy the address (it ends in a long ID) and paste it here. Opening the project jumps straight to it in the Claude app. Share links (claude.ai/share/...) won't work.")
+                Text("Paste a claude.ai chat or project address. It opens in the Claude app. Share links won't work.")
             }
 
             Section {
@@ -564,75 +571,103 @@ struct ProjectDetail: View {
             } header: {
                 Label("Brave windows", systemImage: "globe")
             } footer: {
-                Text("Add any of your named Brave windows (Window > Name Window... in Brave). Opening the project brings them to the front; closing the project minimises them.")
-            }
-
-            Section {
-                ForEach(project.urls, id: \.self) { url in
-                    HStack {
-                        Text(url).lineLimit(1).truncationMode(.middle)
-                        Spacer()
-                        Button {
-                            project.urls.removeAll { $0 == url }
-                        } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.borderless)
-                    }
-                }
-                HStack {
-                    TextField("https://...", text: $newURL)
-                        .onSubmit(addURL)
-                    Button("Add", action: addURL)
-                        .disabled(newURL.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            } header: {
-                Label("Backup pages (optional)", systemImage: "link")
-            } footer: {
-                Text("Only used if the first Brave window above isn't open, e.g. after you've closed it. These pages open in a new Brave window with that name. You can leave this empty.")
-            }
-
-            Section {
-                if layoutKeys.isEmpty {
-                    Text("No layouts saved yet.").foregroundStyle(.secondary)
-                }
-                ForEach(layoutKeys, id: \.self) { key in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(key == currentScreens ? "This screen setup" : "Other screen setup")
-                            Text("\(key), \(project.layouts[key]?.count ?? 0) windows")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button {
-                            project.layouts[key] = nil
-                        } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.borderless)
-                        .help("Delete this layout")
-                    }
-                }
-                HStack {
-                    Button("Save Current Window Positions", action: saveLayoutNow)
-                    if let layoutMessage {
-                        Text(layoutMessage).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            } header: {
-                Label("Window layouts", systemImage: "rectangle.split.3x1")
-            } footer: {
-                Text("Open the project, arrange its windows how you like (e.g. Claude on the left, Word on the right), then save. Each screen setup keeps its own layout, so laptop-only and external-monitor arrangements are stored separately and picked automatically.")
+                Text("Name a window in Brave with Window > Name Window. They come to the front on open and minimise on close.")
             }
 
             Section {
                 LabeledContent("Today", value: formatDuration(project.timeSpent(since: Calendar.current.startOfDay(for: Date()))))
                 LabeledContent("Last 7 days", value: formatDuration(project.timeSpent(since: Date().addingTimeInterval(-7 * 24 * 3600))))
                 LabeledContent("Total", value: formatDuration(project.timeSpent()))
-                Button("Reset Time Log...", role: .destructive) { confirmReset = true }
             } header: {
                 Label("Time spent", systemImage: "clock")
             } footer: {
-                Text("Counts the time the project is open (ticked in the menu), pausing while the Mac is asleep.")
+                Text("Counts while the project is open. Pauses when the Mac sleeps or you're away.")
+            }
+
+            Section {
+                Button {
+                    withAnimation { showAdvanced.toggle() }
+                } label: {
+                    HStack {
+                        Label("Advanced", systemImage: "slider.horizontal.3")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .rotationEffect(.degrees(showAdvanced ? 90 : 0))
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } footer: {
+                if !showAdvanced { Text("Backup pages, window layouts and resetting the time log.") }
+            }
+
+            if showAdvanced {
+                Section {
+                    ForEach(project.urls, id: \.self) { url in
+                        HStack {
+                            Text(url).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Button {
+                                project.urls.removeAll { $0 == url }
+                            } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                    HStack {
+                        TextField("https://...", text: $newURL)
+                            .onSubmit(addURL)
+                        Button("Add", action: addURL)
+                            .disabled(newURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                } header: {
+                    Label("Backup pages (optional)", systemImage: "link")
+                } footer: {
+                    Text("Opened in a new window if the first Brave window above has been closed.")
+                }
+
+                Section {
+                    if layoutKeys.isEmpty {
+                        Text("No layouts saved yet.").foregroundStyle(.secondary)
+                    }
+                    ForEach(layoutKeys, id: \.self) { key in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(key == currentScreens ? "This screen setup" : "Other screen setup")
+                                Text("\(key), \(project.layouts[key]?.count ?? 0) windows")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button {
+                                project.layouts[key] = nil
+                            } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.borderless)
+                            .help("Delete this layout")
+                        }
+                    }
+                    HStack {
+                        Button("Save Current Window Positions", action: saveLayoutNow)
+                        if let layoutMessage {
+                            Text(layoutMessage).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Label("Window layouts", systemImage: "rectangle.split.3x1")
+                } footer: {
+                    Text("Arrange the windows, then save. Laptop-only and external-monitor setups are kept separately.")
+                }
+                Section {
+                    Button("Reset Time Log…", role: .destructive) { confirmReset = true }
+                }
             }
         }
         .formStyle(.grouped)
+        // Drop files from Finder anywhere on the project to add them.
+        .dropDestination(for: URL.self) { urls, _ in
+            let paths = urls.filter(\.isFileURL).map { ($0.path as NSString).abbreviatingWithTildeInPath }
+            for path in paths where !project.files.contains(path) { project.files.append(path) }
+            return !paths.isEmpty
+        }
         .confirmationDialog("Reset the time log for \(project.name)?", isPresented: $confirmReset) {
             Button("Reset", role: .destructive) {
                 project.timeLog = []
@@ -654,7 +689,7 @@ struct ProjectDetail: View {
         if let g = store.group(of: project) { parts.append(g.name) }
         if project.archived { parts.append("Archived") }
         if store.projects.first(where: { $0.id == project.id }).map(store.isOpen) == true {
-            parts.append("Open now")
+            parts.append(store.isPaused(project) ? "Open, paused while you're away" : "Open now")
         }
         let today = project.timeSpent(since: Calendar.current.startOfDay(for: Date()))
         if today >= 60 { parts.append("\(formatDuration(today)) today") }

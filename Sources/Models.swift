@@ -202,6 +202,7 @@ final class ProjectStore: ObservableObject {
     static let closeOthersKey = "closeOthersOnOpen"
 
     func open(_ p: Project, keepOthers: Bool = NSEvent.modifierFlags.contains(.option)) {
+        pausedIDs.remove(p.id)
         let closeOthers = UserDefaults.standard.object(forKey: Self.closeOthersKey) as? Bool ?? true
         if closeOthers && !keepOthers {
             for other in projects where other.id != p.id && isOpen(other) {
@@ -219,6 +220,7 @@ final class ProjectStore: ObservableObject {
     /// `next`: the project about to open instead, whose apps, files and windows are left alone.
     func close(_ p: Project, keepingFor next: Project? = nil) {
         problems[p.id] = nil
+        pausedIDs.remove(p.id)
         var keep = appsInUse(except: p.id)
         if let next { keep.formUnion(apps(of: next)) }
         Launcher.close(p, keepRunning: keep, keeping: next)
@@ -333,9 +335,54 @@ final class ProjectStore: ObservableObject {
         }
     }
 
+    // MARK: Pausing while away
+
+    /// Settings key: minutes without keyboard or mouse before time stops counting (0 = never).
+    static let idleMinutesKey = "idlePauseMinutes"
+
+    /// Open projects whose time is paused because you're away.
+    @Published private(set) var pausedIDs: Set<UUID> = []
+    private var resumeTimer: Timer?
+
+    func isPaused(_ p: Project) -> Bool { pausedIDs.contains(p.id) }
+
+    /// Called every minute: if there's been no input for the set time, stop counting,
+    /// back-dated to the last input, and watch for your return.
+    private func pauseIfAway() {
+        let minutes = UserDefaults.standard.object(forKey: Self.idleMinutesKey) as? Int ?? 10
+        guard minutes > 0 else { return }
+        let idle = Idle.seconds()
+        guard idle >= Double(minutes * 60) else { return }
+        let lastInput = Date().addingTimeInterval(-idle)
+        for p in projects where isOpen(p) && p.activeSession != nil {
+            endSession(p.id, at: lastInput)
+            pausedIDs.insert(p.id)
+            Log.write("PAUSE \(p.name): no keyboard or mouse for \(Int(idle / 60)) min")
+        }
+        guard !pausedIDs.isEmpty, resumeTimer == nil else { return }
+        resumeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.resumeIfBack() }
+        }
+    }
+
+    private func resumeIfBack() {
+        let idle = Idle.seconds()
+        guard idle < 10 else { return }
+        let back = Date().addingTimeInterval(-idle)
+        for id in pausedIDs {
+            guard let p = projects.first(where: { $0.id == id }), isOpen(p) else { continue }
+            update(id) { $0.activeSession = ActiveSession(start: back, lastBeat: Date()) }
+            Log.write("RESUME \(p.name)")
+        }
+        pausedIDs = []
+        resumeTimer?.invalidate()
+        resumeTimer = nil
+    }
+
     /// Runs every minute. A gap of more than 3 minutes means the Mac was asleep:
     /// log up to the last beat and start a fresh session from now.
     func heartbeat() {
+        pauseIfAway()
         let now = Date()
         var copy = projects
         var changed = false
@@ -395,10 +442,19 @@ final class ProjectStore: ObservableObject {
 
     func captureNewProject() {
         var p = Capture.currentProject()
-        if p.files.isEmpty && p.braveWindowNames.isEmpty && p.claudeLink.isEmpty {
+        let apps = Capture.openApps(besides: p.files)
+        if p.files.isEmpty && p.braveWindowNames.isEmpty && p.claudeLink.isEmpty && apps.isEmpty {
             Alerts.show("Nothing to capture",
-                        "Open the files, Brave window and Claude chat you want first, then try again. Project Launcher also needs Accessibility permission (System Settings > Privacy & Security > Accessibility) to see your open windows.")
+                        "Open the files, apps, Brave window and Claude chat you want first, then try again. Project Launcher also needs Accessibility permission (System Settings > Privacy & Security > Accessibility) to see your open windows.")
             return
+        }
+        if !apps.isEmpty {
+            guard let chosen = Alerts.confirm(
+                "Which apps are part of this project?",
+                "Ticked apps open with the project and hide when it closes. Your documents, Brave window and Claude chat are added too.",
+                ok: "Create Project", apps: apps) else { return }
+            p.files.append(contentsOf: chosen)
+            p.hideAppsOnClose.append(contentsOf: chosen)
         }
         let frames = Layouts.capture(p)
         if !frames.isEmpty { p.layouts[ScreenSetup.currentKey()] = frames }
@@ -423,19 +479,31 @@ final class ProjectStore: ObservableObject {
         let newFiles = Capture.openFiles().filter { !taken.contains(resolved($0)) }
         let brave = Brave.captureFrontWindow().flatMap { p.braveWindowNames.contains($0) ? nil : $0 }
         let claude = p.claudeLink.isEmpty ? ClaudeApp.currentLink() : nil
+        // Apps not already in this or another open project.
+        let newApps = Capture.openApps(besides: p.files + newFiles)
+            .filter { !taken.contains(resolved($0)) }
 
         var lines = newFiles.map { "• " + ($0 as NSString).lastPathComponent }
         if let brave { lines.append("• Brave window: \(brave)") }
         if claude != nil { lines.append("• The Claude chat that's open now") }
-        let message = lines.isEmpty
+        var message = lines.isEmpty && newApps.isEmpty
             ? "Nothing new is open. Save the current window positions for \(p.name)?"
             : "Add to \(p.name):\n\n" + lines.joined(separator: "\n")
               + "\n\nThe current window positions are saved too. You can remove anything later in Edit Projects."
-        guard Alerts.confirm("Update \(p.name)?", message, ok: lines.isEmpty ? "Save Layout" : "Add") else { return }
+        if lines.isEmpty && !newApps.isEmpty { message = "Add the ticked apps to \(p.name)? The current window positions are saved too." }
+        let ok = lines.isEmpty && newApps.isEmpty ? "Save Layout" : "Add"
+        var chosenApps: [String] = []
+        if newApps.isEmpty {
+            guard Alerts.confirm("Update \(p.name)?", message, ok: ok) else { return }
+        } else {
+            guard let chosen = Alerts.confirm("Update \(p.name)?", message, ok: ok, apps: newApps) else { return }
+            chosenApps = chosen
+        }
 
-        Log.write("UPDATE \(p.name): added \(newFiles) brave=\(brave ?? "-") claude=\(claude ?? "-")")
+        Log.write("UPDATE \(p.name): added \(newFiles) apps=\(chosenApps) brave=\(brave ?? "-") claude=\(claude ?? "-")")
         update(id) { q in
-            q.files.append(contentsOf: newFiles)
+            q.files.append(contentsOf: newFiles + chosenApps)
+            q.hideAppsOnClose.append(contentsOf: chosenApps)
             if let brave { q.braveWindowNames.append(brave) }
             if let claude { q.claudeLink = claude }
         }
@@ -484,6 +552,20 @@ final class ProjectStore: ObservableObject {
         p.groupID = group
         projects.append(p)
         return p.id
+    }
+
+    /// A copy set up the same way (files, links, windows, layouts), with no time logged,
+    /// placed just after the original.
+    func duplicate(_ id: UUID) -> UUID? {
+        guard let i = projects.firstIndex(where: { $0.id == id }) else { return nil }
+        var copy = projects[i]
+        copy.id = UUID()
+        copy.name += " copy"
+        copy.timeLog = []
+        copy.activeSession = nil
+        copy.archived = false
+        projects.insert(copy, at: i + 1)
+        return copy.id
     }
 
     func addGroup() -> UUID {
@@ -601,6 +683,14 @@ struct Problem: Hashable {
 }
 
 // MARK: - Helpers
+
+enum Idle {
+    /// Seconds since the last keyboard, mouse or trackpad input.
+    static func seconds() -> TimeInterval {
+        guard let anyInput = CGEventType(rawValue: ~0) else { return 0 }
+        return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
+    }
+}
 
 func expandPath(_ path: String) -> String {
     (path as NSString).expandingTildeInPath

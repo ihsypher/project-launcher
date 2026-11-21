@@ -352,7 +352,7 @@ enum Brave {
         AppleScriptRunner.result(script)
     }
 
-    /// The Brave window you're in (front-most, not minimised), for "New Project from Open Windows".
+    /// The Brave window you're in (front-most, not minimised), for "New Project from What's Open".
     /// If it has no name yet, asks for one (suggesting the current tab's title) and names it in Brave.
     static func captureFrontWindow() -> String? {
         guard isRunning else { return nil }
@@ -922,6 +922,31 @@ enum Alerts {
         alert.addButton(withTitle: ok)
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Like confirm, with a tick box for each app (ticked unless it's an everyday app).
+    /// Returns the ticked apps, or nil if cancelled.
+    static func confirm(_ title: String, _ message: String, ok: String, apps: [String]) -> [String]? {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: ok)
+        alert.addButton(withTitle: "Cancel")
+        let boxes = apps.map { path -> NSButton in
+            let id = Bundle(url: URL(fileURLWithPath: expandPath(path)))?.bundleIdentifier ?? ""
+            let box = NSButton(checkboxWithTitle: appDisplayName(id), target: nil, action: nil)
+            box.state = Capture.everydayApps.contains(id) ? .off : .on
+            return box
+        }
+        let stack = NSStackView(views: boxes)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.frame = NSRect(origin: .zero, size: NSSize(width: 280, height: stack.fittingSize.height))
+        alert.accessoryView = stack
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return zip(apps, boxes).filter { $0.1.state == .on }.map(\.0)
     }
 
     static func show(_ title: String, _ message: String) {

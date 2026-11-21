@@ -59,18 +59,19 @@ struct MenuContent: View {
 
         Divider()
 
-        Button("Save Window Layout of Open Projects") { store.saveLayoutsForOpenProjects() }
-            .disabled(store.openIDs.isEmpty)
-        Button("New Project from Open Windows") { store.captureNewProject() }
-        updateMenu
-        Button("Close All Open Projects") { store.closeAll() }
-            .disabled(store.openIDs.isEmpty)
+        Button("New Project from What's Open") { store.captureNewProject() }
+        // Only shown while a project is open.
+        if !store.openIDs.isEmpty {
+            updateMenu
+            Button("Save Window Positions") { store.saveLayoutsForOpenProjects() }
+            Button("Close All Projects") { store.closeAll() }
+        }
 
         Divider()
 
-        Button("Edit Projects...") { EditorWindow.shared.show(store: store) }
+        Button("Edit Projects…") { EditorWindow.shared.show(store: store) }
             .keyboardShortcut(",")
-        Button(store.updateAvailable ? "Update Available: Install Now..." : "Update Project Launcher...") {
+        Button(store.updateAvailable ? "Install Update…" : "Check for Updates…") {
             Updater.run()
         }
 
@@ -88,9 +89,9 @@ struct MenuContent: View {
     @ViewBuilder private var updateMenu: some View {
         let open = store.projects.filter { store.isOpen($0) }
         if open.count == 1, let p = open.first {
-            Button("Update \(p.name) from Open Windows") { store.updateFromOpenWindows(p.id) }
+            Button("Add What's Open to \(p.name)…") { store.updateFromOpenWindows(p.id) }
         } else {
-            Menu("Update Project from Open Windows") {
+            Menu("Add What's Open to") {
                 ForEach(open) { p in
                     Button(store.displayName(p)) { store.updateFromOpenWindows(p.id) }
                 }
@@ -130,6 +131,7 @@ struct ProjectToggle: View {
         if store.isOpen(project) {
             let today = project.timeSpent(since: Calendar.current.startOfDay(for: Date()))
             extras.append("\(formatDuration(today)) today")
+            if store.isPaused(project) { extras.append("paused") }
         }
         return extras.isEmpty ? project.name : "\(project.name)  (\(extras.joined(separator: ", ")))"
     }

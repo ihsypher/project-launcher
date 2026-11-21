@@ -102,7 +102,7 @@ enum Layouts {
     }
 }
 
-// MARK: - "New Project from Open Windows"
+// MARK: - "New Project from What's Open"
 
 @MainActor
 enum Capture {
@@ -161,6 +161,41 @@ enum Capture {
 
         return paths
     }
+
+    /// Apps showing a window that aren't covered by the documents, Brave or Claude
+    /// (e.g. Terminal or MATLAB), as ~-abbreviated .app paths.
+    static func openApps(besides files: [String]) -> [String] {
+        guard AX.ensureTrusted(prompt: false) else { return [] }
+        var skip: Set<String> = [
+            Bundle.main.bundleIdentifier ?? "",
+            "com.apple.finder",
+            Brave.bundleID,
+            ClaudeApp.bundleID() ?? "",
+        ]
+        // Apps whose documents were captured (Word, Preview...) or that are already in the project.
+        for f in files { if let id = appBundleID(f) { skip.insert(id) } }
+
+        var paths: [String] = []
+        for app in NSWorkspace.shared.runningApplications
+        where app.activationPolicy == .regular && !app.isHidden {
+            guard let id = app.bundleIdentifier, !skip.contains(id), let url = app.bundleURL else { continue }
+            let hasWindow = AX.windows(pid: app.processIdentifier).contains {
+                !AX.isMinimized($0) && AX.string($0, kAXSubroleAttribute) == kAXStandardWindowSubrole
+            }
+            let path = (url.path as NSString).abbreviatingWithTildeInPath
+            if hasWindow && !paths.contains(path) { paths.append(path) }
+        }
+        return paths
+    }
+
+    /// Apps that are usually open for everything, so they start unticked when capturing.
+    static let everydayApps: Set<String> = [
+        "com.apple.MobileSMS", "com.apple.mail", "com.apple.Music", "com.spotify.client",
+        "com.apple.systempreferences", "com.apple.iCal", "com.apple.ActivityMonitor",
+        "com.apple.AppStore", "com.apple.FaceTime", "net.whatsapp.WhatsApp", "com.hnc.Discord",
+        "com.tinyspeck.slackmacgap", "com.apple.Photos", "com.apple.reminders", "com.apple.Notes",
+        "com.microsoft.teams2", "us.zoom.xos", "com.apple.Safari", "com.google.Chrome",
+    ]
 }
 
 /// Word, Excel and PowerPoint report OneDrive and SharePoint files as web addresses

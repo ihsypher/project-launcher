@@ -1,7 +1,7 @@
 #!/bin/bash
 # Gets the latest version from GitHub, rebuilds it and reinstalls Project Launcher.
 # Run it from Terminal (./update.command), double-click it, or use the app's
-# "Update Project Launcher..." menu item.
+# "Check for Updates…" menu item.
 set -euo pipefail
 cd "$(dirname "$0")"
 
