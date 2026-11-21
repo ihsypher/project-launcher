@@ -322,6 +322,7 @@ struct SettingsView: View {
     @AppStorage(ProjectStore.idleMinutesKey) private var idleMinutes = 10
     @EnvironmentObject var store: ProjectStore
     @State private var openAtLogin = LoginItem.isEnabled
+    @State private var backupStatus = Backups.lastBackupText()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -368,6 +369,28 @@ struct SettingsView: View {
 
                 Section {
                     HStack {
+                        Button("Back Up Now") {
+                            Backups.make()
+                            backupStatus = Backups.lastBackupText()
+                        }
+                        Button("Show Backups") {
+                            if Backups.all().isEmpty { Backups.make() }
+                            NSWorkspace.shared.activateFileViewerSelecting([Backups.folder])
+                        }
+                        Button("Restore…") { restore() }
+                        Spacer()
+                        Text(backupStatus).font(.caption).foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Label("Backups", systemImage: "clock.arrow.circlepath")
+                } footer: {
+                    Text(Backups.isInICloud
+                         ? "Your projects, groups and time are backed up daily to iCloud Drive > Project Launcher Backups (last \(Backups.keep) kept), so they're safe if you reinstall or get a new Mac."
+                         : "Your projects, groups and time are backed up daily (last \(Backups.keep) kept). Turn on iCloud Drive to keep them off this Mac too.")
+                }
+
+                Section {
+                    HStack {
                         Button("Show Log") {
                             if !FileManager.default.fileExists(atPath: Log.url.path) {
                                 Log.write("Log started")
@@ -391,7 +414,19 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 500, height: 560)
+        .frame(width: 500, height: 660)
+    }
+
+    private func restore() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.directoryURL = Backups.folder
+        panel.prompt = "Restore"
+        panel.message = "Choose a backup to restore"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        store.restoreBackup(from: url)
+        backupStatus = Backups.lastBackupText()
     }
 }
 

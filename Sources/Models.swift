@@ -169,14 +169,19 @@ final class ProjectStore: ObservableObject {
     private var timer: Timer?
     private var updateTimer: Timer?
 
-    init() {
-        let support = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    /// ~/Library/Application Support/ProjectLauncher
+    static var dataFolder: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ProjectLauncher", isDirectory: true)
+    }
+
+    init() {
+        let support = Self.dataFolder
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         fileURL = support.appendingPathComponent("projects.json")
         load()
         finishStaleSessions()
+        Backups.makeIfDue()
         RaycastScripts.sync(projects: projects, groups: groups)
         URLEvents.shared.handler = { [weak self] url in self?.handle(url) }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -390,6 +395,7 @@ final class ProjectStore: ObservableObject {
     /// log up to the last beat and start a fresh session from now.
     func heartbeat() {
         pauseIfAway()
+        Backups.makeIfDue()
         let now = Date()
         var copy = projects
         var changed = false
@@ -518,6 +524,34 @@ final class ProjectStore: ObservableObject {
             let frames = Layouts.capture(updated)
             if !frames.isEmpty { update(id) { $0.layouts[ScreenSetup.currentKey()] = frames } }
         }
+    }
+
+    // MARK: Backups
+
+    /// Replaces every project and group with a backup's. Asks first, and backs up
+    /// the current list so the restore can be undone.
+    func restoreBackup(from folder: URL) {
+        guard openIDs.isEmpty else {
+            Alerts.show("Close your projects first", "Restoring replaces every project, so close the open ones (Close All Projects) and try again.")
+            return
+        }
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent("projects.json")),
+              let restored = try? JSONDecoder().decode([Project].self, from: data) else {
+            Alerts.show("That isn't a backup", "Choose a backup folder (named like \"2026-11-21 09.30\") with projects.json inside.")
+            return
+        }
+        let restoredGroups = (try? Data(contentsOf: folder.appendingPathComponent("groups.json")))
+            .flatMap { try? JSONDecoder().decode([ProjectGroup].self, from: $0) } ?? []
+        guard Alerts.confirm("Restore \(restored.count) projects from \(folder.lastPathComponent)?",
+                             "This replaces your \(projects.count) current projects and their time logs. They're backed up first, so you can restore them again if needed.",
+                             ok: "Restore") else { return }
+        Backups.make(note: " (before restore)")
+        Log.write("RESTORE from \(folder.path)")
+        editorSelection = nil
+        groups = restoredGroups
+        projects = restored
+        migrateSubProjects()
+        finishStaleSessions()
     }
 
     // MARK: Groups

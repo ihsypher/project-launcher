@@ -131,3 +131,72 @@ enum LoginItem {
         }
     }
 }
+
+// MARK: - Backups
+
+/// Copies of projects.json and groups.json, one folder per backup ("2026-11-21 09.30").
+/// Made once a day automatically, kept in iCloud Drive when it's on so they survive a new Mac.
+@MainActor
+enum Backups {
+    static let keep = 30
+
+    static var folder: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let iCloud = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
+        if FileManager.default.fileExists(atPath: iCloud.path) {
+            return iCloud.appendingPathComponent("Project Launcher Backups", isDirectory: true)
+        }
+        return ProjectStore.dataFolder.appendingPathComponent("Backups", isDirectory: true)
+    }
+
+    static var isInICloud: Bool { folder.path.contains("Mobile Documents") }
+
+    /// Backups, newest first.
+    static func all() -> [URL] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        return names.filter { !$0.hasPrefix(".") }.sorted(by: >).map { folder.appendingPathComponent($0, isDirectory: true) }
+    }
+
+    /// A backup if there isn't one from today yet.
+    static func makeIfDue() {
+        let today = stamp(Date()).prefix(10)
+        if !all().contains(where: { $0.lastPathComponent.hasPrefix(today) }) { make() }
+    }
+
+    @discardableResult
+    static func make(note: String = "") -> URL? {
+        let fm = FileManager.default
+        let source = ProjectStore.dataFolder
+        guard fm.fileExists(atPath: source.appendingPathComponent("projects.json").path) else { return nil }
+        let target = folder.appendingPathComponent(stamp(Date()) + note, isDirectory: true)
+        do {
+            try fm.createDirectory(at: target, withIntermediateDirectories: true)
+            for name in ["projects.json", "groups.json"] {
+                let from = source.appendingPathComponent(name), to = target.appendingPathComponent(name)
+                guard fm.fileExists(atPath: from.path) else { continue }
+                try? fm.removeItem(at: to)
+                try fm.copyItem(at: from, to: to)
+            }
+        } catch {
+            Log.write("BACKUP failed: \(error.localizedDescription)")
+            return nil
+        }
+        Log.write("BACKUP \(target.path)")
+        for old in all().dropFirst(keep) { try? fm.removeItem(at: old) }
+        return target
+    }
+
+    static func lastBackupText() -> String {
+        guard let latest = all().first,
+              let date = (try? latest.resourceValues(forKeys: [.creationDateKey]))?.creationDate else { return "No backups yet" }
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return "Last backup " + f.localizedString(for: date, relativeTo: Date())
+    }
+
+    private static func stamp(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH.mm"
+        return f.string(from: date)
+    }
+}
