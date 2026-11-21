@@ -196,6 +196,7 @@ enum Backups {
 
     private static func stamp(_ date: Date) -> String {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")  // 24-hour even if the Mac uses 12-hour time
         f.dateFormat = "yyyy-MM-dd HH.mm"
         return f.string(from: date)
     }
