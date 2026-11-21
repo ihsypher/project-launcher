@@ -117,7 +117,8 @@ enum AppWindows {
     static func all(_ bundleID: String) -> [AXUIElement] {
         NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .flatMap { AX.windows(pid: $0.processIdentifier) }
-            .filter { AX.string($0, kAXSubroleAttribute) == kAXStandardWindowSubrole }
+            // Minimised windows report themselves as dialogs (Terminal does), so keep those too.
+            .filter { AX.string($0, kAXSubroleAttribute) == kAXStandardWindowSubrole || AX.isMinimized($0) }
     }
 
     /// The front visible window.
@@ -142,6 +143,14 @@ enum AppWindows {
             return w
         }
         return fallback && windows.count == 1 ? windows[0] : nil
+    }
+
+    /// The windows a project uses: the one it saved a position for, or else every window
+    /// (it can't tell which one is the project's).
+    static func projectWindows(_ bundleID: String, path: String, in p: Project) -> [AXUIElement] {
+        let saved = p.layouts[ScreenSetup.currentKey()]?.first { $0.kind == "app" && $0.key == path }
+        if let saved, saved.title != nil { return find(bundleID, saved, fallback: false).map { [$0] } ?? [] }
+        return all(bundleID)
     }
 
     private static func firstPart(_ title: String) -> String {

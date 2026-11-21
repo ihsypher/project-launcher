@@ -26,6 +26,13 @@ enum Launcher {
         for (i, name) in windows.enumerated() {
             Brave.show(windowName: name, urls: i == 0 ? p.urls : [])
         }
+        // Minimised app windows without a saved position (those are restored with the layout).
+        let placed = Set((p.layouts[ScreenSetup.currentKey()] ?? []).filter { $0.kind == "app" }.map(\.key))
+        for path in p.files where p.minimiseAppsOnClose.contains(path) && !placed.contains(path) {
+            if let id = wholeAppBundleID(path) {
+                AppWindows.projectWindows(id, path: path, in: p).forEach { AX.setMinimized($0, false) }
+            }
+        }
         // Claude last, so the chat ends up in front.
         ClaudeApp.open(link: p.claudeLink)
         // Put windows back where they were saved for this screen setup.
@@ -56,6 +63,10 @@ enum Launcher {
             guard let name = apps.first?.localizedName else { continue }
             if keepRunning.contains(bundleID) {
                 Log.write("  leave \(name) running: another open project uses it")
+            } else if p.minimiseAppsOnClose.contains(path) {
+                let windows = AppWindows.projectWindows(bundleID, path: path, in: p)
+                Log.write("  minimise \(windows.count) \(name) window(s)")
+                windows.forEach { AX.setMinimized($0, true) }
             } else if p.hideAppsOnClose.contains(path) {
                 Log.write("  hide app \(name)")
                 apps.forEach { $0.hide() }
@@ -123,6 +134,7 @@ enum ClaudeApp {
             return
         }
         NSWorkspace.shared.open(url)
+        restoreMinimised()
     }
 
     /// Bundle ID of whichever app handles claude:// links (the Claude desktop app).
@@ -178,6 +190,21 @@ enum ClaudeApp {
         guard mode != "leave", let bundleID = bundleID() else { return }
         Log.write("  \(mode) Claude")
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        if mode == "minimise" {
+            minimiseWindows(bundleID)
+            // Check again in case it was busy or a window was still opening.
+            for delay in [0.6, 2.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    MainActor.assumeIsolated {
+                        if isShowing(mode: "minimise") {
+                            Log.write("  Claude still showing after \(delay)s, minimising again")
+                            minimiseWindows(bundleID)
+                        }
+                    }
+                }
+            }
+            return
+        }
         for app in apps {
             if mode == "quit" { app.terminate() } else { app.hide() }
         }
@@ -199,10 +226,23 @@ enum ClaudeApp {
         }
     }
 
-    static func isShowing() -> Bool {
+    /// Whether Claude is on screen: not hidden, and for `minimise` with a window not minimised.
+    static func isShowing(mode: String = "hide") -> Bool {
         guard let id = bundleID() else { return false }
-        return NSRunningApplication.runningApplications(withBundleIdentifier: id)
+        let visible = NSRunningApplication.runningApplications(withBundleIdentifier: id)
             .contains { !$0.isTerminated && !$0.isHidden }
+        guard visible, mode == "minimise" else { return visible }
+        return AppWindows.all(id).contains { !AX.isMinimized($0) }
+    }
+
+    private static func minimiseWindows(_ bundleID: String) {
+        AppWindows.all(bundleID).filter { !AX.isMinimized($0) }.forEach { AX.setMinimized($0, true) }
+    }
+
+    /// Brings back windows minimised when the project closed (opening a link doesn't always).
+    static func restoreMinimised() {
+        guard let id = bundleID() else { return }
+        AppWindows.all(id).filter(AX.isMinimized).forEach { AX.setMinimized($0, false) }
     }
 }
 
@@ -488,6 +528,10 @@ enum AX {
         guard AXValueGetValue(posRef as! AXValue, .cgPoint, &pos),
               AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) else { return nil }
         return CGRect(origin: pos, size: size)
+    }
+
+    static func setMinimized(_ window: AXUIElement, _ on: Bool) {
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, on ? kCFBooleanTrue : kCFBooleanFalse)
     }
 
     static func setFrame(_ window: AXUIElement, _ rect: CGRect) {
@@ -781,7 +825,8 @@ enum Verify {
             issues.append(Issue(text: "\(name(f)) is still open",
                                 stuckApp: app.map(officeAppIDs.contains) == true ? app : nil))
         }
-        var quitApps = Set(p.files.filter { wholeAppBundleID($0) != nil && !p.hideAppsOnClose.contains($0) }
+        var quitApps = Set(p.files.filter { wholeAppBundleID($0) != nil && !p.hideAppsOnClose.contains($0)
+                                              && !p.minimiseAppsOnClose.contains($0) }
             .compactMap(wholeAppBundleID))
         quitApps.formUnion(p.quitAppsOnClose.filter { p.files.contains($0) }.compactMap(appBundleID))
         for appID in quitApps.subtracting(keepRunning) where isRunning(appID) {
@@ -789,7 +834,7 @@ enum Verify {
         }
         if !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty,
            let id = ClaudeApp.bundleID(), !keepRunning.contains(id) {
-            if p.claudeOnClose == "hide" && ClaudeApp.isShowing() {
+            if (p.claudeOnClose == "hide" || p.claudeOnClose == "minimise") && ClaudeApp.isShowing(mode: p.claudeOnClose) {
                 issues.append(Issue(text: "Claude is still showing"))
             } else if p.claudeOnClose == "quit" && isRunning(id) {
                 issues.append(Issue(text: "Claude is still running"))

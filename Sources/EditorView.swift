@@ -474,13 +474,14 @@ struct ProjectDetail: View {
                             Picker("On close", selection: appCloseMode(for: path)) {
                                 Text(closesWholeApp(path) ? "Quit \(appName(for: path))" : "Quit").tag("quit")
                                 Text(closesWholeApp(path) ? "Hide \(appName(for: path))" : "Hide").tag("hide")
+                                Text("Minimise").tag("minimise")
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
                             .fixedSize()
                             .help(closesWholeApp(path)
-                                  ? "\(appName(for: path)) can't close one file, so it quits or hides instead"
-                                  : "What happens to this app when you close the project")
+                                  ? "\(appName(for: path)) can't close one file, so it quits, hides or minimises instead"
+                                  : "Quit the app, hide all its windows, or minimise just this project's window")
                         } else if isOfficeDocument(path) {
                             Picker("On close", selection: officeCloseMode(for: path)) {
                                 Text("Close File").tag("file")
@@ -494,6 +495,7 @@ struct ProjectDetail: View {
                         Button {
                             project.files.removeAll { $0 == path }
                             project.hideAppsOnClose.removeAll { $0 == path }
+                            project.minimiseAppsOnClose.removeAll { $0 == path }
                             project.quitAppsOnClose.removeAll { $0 == path }
                         } label: { Image(systemName: "xmark.circle.fill") }
                         .buttonStyle(.borderless)
@@ -508,7 +510,7 @@ struct ProjectDetail: View {
             } header: {
                 Label("Files", systemImage: "doc.on.doc")
             } footer: {
-                Text("Drag files here, or use Add Files. They open in their usual app and close with the project. Apps (and MATLAB, which can't close one file) quit or hide instead.")
+                Text("Drag files here, or use Add Files. They open in their usual app and close with the project. Apps (and MATLAB, which can't close one file) quit, hide or minimise instead.")
             }
 
             Section {
@@ -519,6 +521,7 @@ struct ProjectDetail: View {
                         .font(.caption).foregroundStyle(.red)
                 }
                 Picker("When the project closes", selection: $project.claudeOnClose) {
+                    Text("Minimise Claude").tag("minimise")
                     Text("Hide Claude").tag("hide")
                     Text("Quit Claude").tag("quit")
                     Text("Leave it").tag("leave")
@@ -665,7 +668,7 @@ struct ProjectDetail: View {
         // Drop files from Finder anywhere on the project to add them.
         .dropDestination(for: URL.self) { urls, _ in
             let paths = urls.filter(\.isFileURL).map { ($0.path as NSString).abbreviatingWithTildeInPath }
-            for path in paths where !project.files.contains(path) { project.files.append(path) }
+            paths.forEach(add)
             return !paths.isEmpty
         }
         .confirmationDialog("Reset the time log for \(project.name)?", isPresented: $confirmReset) {
@@ -761,10 +764,15 @@ struct ProjectDetail: View {
 
     private func appCloseMode(for path: String) -> Binding<String> {
         Binding(
-            get: { project.hideAppsOnClose.contains(path) ? "hide" : "quit" },
+            get: {
+                project.minimiseAppsOnClose.contains(path) ? "minimise"
+                    : project.hideAppsOnClose.contains(path) ? "hide" : "quit"
+            },
             set: { mode in
                 project.hideAppsOnClose.removeAll { $0 == path }
+                project.minimiseAppsOnClose.removeAll { $0 == path }
                 if mode == "hide" { project.hideAppsOnClose.append(path) }
+                if mode == "minimise" { project.minimiseAppsOnClose.append(path) }
             }
         )
     }
@@ -782,10 +790,14 @@ struct ProjectDetail: View {
         panel.canChooseFiles = true
         panel.prompt = "Add"
         guard panel.runModal() == .OK else { return }
-        for url in panel.urls {
-            let path = (url.path as NSString).abbreviatingWithTildeInPath
-            if !project.files.contains(path) { project.files.append(path) }
-        }
+        panel.urls.map { ($0.path as NSString).abbreviatingWithTildeInPath }.forEach(add)
+    }
+
+    /// Adds a file. Apps (and MATLAB files) minimise their window on close unless changed.
+    private func add(_ path: String) {
+        guard !project.files.contains(path) else { return }
+        project.files.append(path)
+        if isApp(path) || closesWholeApp(path) { project.minimiseAppsOnClose.append(path) }
     }
 
     /// A file that's been moved or renamed: look for one with the same name (Spotlight),
@@ -822,6 +834,7 @@ struct ProjectDetail: View {
         func swap(_ list: inout [String]) { list = list.map { $0 == old ? newPath : $0 } }
         swap(&project.files)
         swap(&project.hideAppsOnClose)
+        swap(&project.minimiseAppsOnClose)
         swap(&project.quitAppsOnClose)
         for key in project.layouts.keys {
             project.layouts[key] = project.layouts[key]?.map { f in

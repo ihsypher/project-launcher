@@ -65,13 +65,16 @@ struct Project: Codable, Identifiable, Hashable {
     var color: String = "blue"
     /// Apps in `files` that should be hidden (not quit) when the project closes.
     var hideAppsOnClose: [String] = []
+    /// Apps in `files` whose project window should be minimised (not the app hidden or quit)
+    /// when the project closes. Takes priority over hiding.
+    var minimiseAppsOnClose: [String] = []
     /// Word/Excel/PowerPoint files whose app should be quit (not just the file closed)
     /// when the project closes.
     var quitAppsOnClose: [String] = []
     /// A claude.ai chat or project link, opened in the Claude desktop app.
     var claudeLink: String = ""
     /// What happens to the Claude app when the project closes: "quit", "hide" or "leave".
-    var claudeOnClose: String = "hide"
+    var claudeOnClose: String = "minimise"
     /// Optional due date, shown as a countdown in the menu.
     var deadline: Date? = nil
     /// Saved window positions, one layout per screen setup (see ScreenSetup).
@@ -84,7 +87,7 @@ struct Project: Codable, Identifiable, Hashable {
     var archived: Bool = false
 
     enum CodingKeys: String, CodingKey {
-        case id, name, groupID, files, urls, braveWindowNames, icon, color, hideAppsOnClose, quitAppsOnClose, claudeLink, claudeOnClose
+        case id, name, groupID, files, urls, braveWindowNames, icon, color, hideAppsOnClose, minimiseAppsOnClose, quitAppsOnClose, claudeLink, claudeOnClose
         case deadline, layouts, timeLog, activeSession, archived
         case legacyParentID = "parentID"
     }
@@ -113,9 +116,10 @@ extension Project {
         icon = try c.decodeIfPresent(String.self, forKey: .icon) ?? "doc.text"
         color = try c.decodeIfPresent(String.self, forKey: .color) ?? "blue"
         hideAppsOnClose = try c.decodeIfPresent([String].self, forKey: .hideAppsOnClose) ?? []
+        minimiseAppsOnClose = try c.decodeIfPresent([String].self, forKey: .minimiseAppsOnClose) ?? []
         quitAppsOnClose = try c.decodeIfPresent([String].self, forKey: .quitAppsOnClose) ?? []
         claudeLink = try c.decodeIfPresent(String.self, forKey: .claudeLink) ?? ""
-        claudeOnClose = try c.decodeIfPresent(String.self, forKey: .claudeOnClose) ?? "hide"
+        claudeOnClose = try c.decodeIfPresent(String.self, forKey: .claudeOnClose) ?? "minimise"
         deadline = try c.decodeIfPresent(Date.self, forKey: .deadline)
         layouts = try c.decodeIfPresent([String: [SavedFrame]].self, forKey: .layouts) ?? [:]
         timeLog = try c.decodeIfPresent([WorkSession].self, forKey: .timeLog) ?? []
@@ -454,10 +458,10 @@ final class ProjectStore: ObservableObject {
         if !apps.isEmpty {
             guard let chosen = Alerts.confirm(
                 "Which apps are part of this project?",
-                "Ticked apps open with the project and hide when it closes. Your documents, Brave window and Claude chat are added too.",
+                "Ticked apps open with the project, and their window minimises when it closes. Your documents, Brave window and Claude chat are added too.",
                 ok: "Create Project", apps: apps) else { return }
             p.files.append(contentsOf: chosen)
-            p.hideAppsOnClose.append(contentsOf: chosen)
+            p.minimiseAppsOnClose.append(contentsOf: chosen)
         }
         let frames = Layouts.capture(p)
         if !frames.isEmpty { p.layouts[ScreenSetup.currentKey()] = frames }
@@ -506,7 +510,7 @@ final class ProjectStore: ObservableObject {
         Log.write("UPDATE \(p.name): added \(newFiles) apps=\(chosenApps) brave=\(brave ?? "-") claude=\(claude ?? "-")")
         update(id) { q in
             q.files.append(contentsOf: newFiles + chosenApps)
-            q.hideAppsOnClose.append(contentsOf: chosenApps)
+            q.minimiseAppsOnClose.append(contentsOf: chosenApps)
             if let brave { q.braveWindowNames.append(brave) }
             if let claude { q.claudeLink = claude }
         }
@@ -608,6 +612,22 @@ final class ProjectStore: ObservableObject {
               let decoded = try? JSONDecoder().decode([Project].self, from: data) else { return }
         projects = decoded
         migrateSubProjects()
+        migrateHideToMinimise()
+    }
+
+    /// Before 1.19, closing hid apps and Claude (all their windows). Minimising only the
+    /// project's window is the default now, so switch them over once.
+    private func migrateHideToMinimise() {
+        let key = "migratedHideToMinimise"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        var copy = projects
+        for i in copy.indices {
+            copy[i].minimiseAppsOnClose += copy[i].hideAppsOnClose.filter { !copy[i].minimiseAppsOnClose.contains($0) }
+            copy[i].hideAppsOnClose = []
+            if copy[i].claudeOnClose == "hide" { copy[i].claudeOnClose = "minimise" }
+        }
+        if copy != projects { projects = copy }
     }
 
     /// Version 1.2 to 1.12 nested projects under other projects. Each top-level parent becomes
