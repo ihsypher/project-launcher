@@ -24,6 +24,9 @@ struct SavedFrame: Codable, Hashable {
     var y: Double
     var w: Double
     var h: Double
+    /// Which of an app's windows this is: its title when saved, and for Terminal its tty.
+    var title: String? = nil
+    var tty: String? = nil
 
     init(kind: String, key: String, rect: CGRect) {
         self.kind = kind

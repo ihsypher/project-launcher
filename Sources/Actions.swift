@@ -412,7 +412,7 @@ enum Brave {
         AppleScriptRunner.run(script)
     }
 
-    private static func escape(_ s: String) -> String {
+    static func escape(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\")
          .replacingOccurrences(of: "\"", with: "\\\"")
     }
@@ -504,6 +504,7 @@ enum AX {
         AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
         AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, posValue)
         AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
     }
 
     /// First visible window of an app.

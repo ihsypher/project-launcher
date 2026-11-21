@@ -53,6 +53,7 @@ Each rebuild gets a new ad-hoc signature, so macOS can forget the permissions. S
 - Word, Excel and PowerPoint files can be set (in Edit Projects) to **Quit Word/Excel** when the project closes, instead of just closing the file. It's skipped if another open project uses the same app, and the app still asks about any other unsaved documents.
 - Closing a project asks each app to close the project's documents (pressing the window's close button for apps that can't be asked), so apps still ask before discarding unsaved changes. MATLAB can't close a single file, so MATLAB files quit or hide MATLAB instead.
 - Time is counted while a project is ticked, and pauses while the Mac sleeps or you're away (no keyboard or mouse for 10 minutes by default, back-dated to when you were last active; change it in Settings). The menu shows "paused" until you're back.
+- An app's saved position belongs to one of its windows (matched by title, and for Terminal by its session), so with several Terminal windows open the project's own one is un-minimised and moved, not whichever is in front.
 - Layouts are stored per screen setup, so the laptop-only and external-monitor arrangements don't overwrite each other.
 - Projects are saved in `~/Library/Application Support/ProjectLauncher/projects.json`.
 - Start at login: Edit Projects > gear icon > **Open Project Launcher at login**.

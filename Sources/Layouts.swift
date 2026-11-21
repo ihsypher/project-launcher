@@ -35,12 +35,17 @@ enum Layouts {
             }
         }
 
-        // Apps added to the project
+        // Apps added to the project: the window saved before if it's still there, else the front one.
+        let before = p.layouts[ScreenSetup.currentKey()] ?? []
         for path in p.files where isApp(path) {
-            if let id = Bundle(url: URL(fileURLWithPath: expandPath(path)))?.bundleIdentifier,
-               let w = AX.firstWindow(bundleID: id), let r = AX.frame(of: w) {
-                frames.append(SavedFrame(kind: "app", key: path, rect: r))
-            }
+            guard let id = Bundle(url: URL(fileURLWithPath: expandPath(path)))?.bundleIdentifier else { continue }
+            let saved = before.first { $0.kind == "app" && $0.key == path }
+            let found = saved.flatMap { AppWindows.find(id, $0, fallback: false) }
+            guard let w = found ?? AppWindows.front(id), let r = AX.frame(of: w) else { continue }
+            var f = SavedFrame(kind: "app", key: path, rect: r)
+            f.title = AX.string(w, kAXTitleAttribute)
+            if id == Terminal.bundleID, let t = f.title { f.tty = Terminal.tty(windowNamed: t) }
+            frames.append(f)
         }
 
         // Brave windows
@@ -76,7 +81,7 @@ enum Layouts {
             switch f.kind {
             case "app":
                 if let id = Bundle(url: URL(fileURLWithPath: expandPath(f.key)))?.bundleIdentifier,
-                   let w = AX.firstWindow(bundleID: id) {
+                   let w = AppWindows.find(id, f, fallback: true) {
                     AX.setFrame(w, f.rect)
                 }
             case "brave":
@@ -100,6 +105,86 @@ enum Layouts {
                 apply(frames)
             }
         }
+    }
+}
+
+// MARK: - Telling an app's windows apart
+
+/// Finds the window a saved app frame belongs to (e.g. one of several Terminal windows),
+/// minimised ones included.
+@MainActor
+enum AppWindows {
+    static func all(_ bundleID: String) -> [AXUIElement] {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .flatMap { AX.windows(pid: $0.processIdentifier) }
+            .filter { AX.string($0, kAXSubroleAttribute) == kAXStandardWindowSubrole }
+    }
+
+    /// The front visible window.
+    static func front(_ bundleID: String) -> AXUIElement? {
+        all(bundleID).first { !AX.isMinimized($0) }
+    }
+
+    /// Matches by Terminal tty, then exact title, then the title's first part
+    /// (Terminal starts it with the folder, e.g. "ProjectLauncher — -zsh — 80×24").
+    /// Frames saved before windows were told apart (no title) use the front window,
+    /// and with `fallback` so does an app with only one window.
+    static func find(_ bundleID: String, _ f: SavedFrame, fallback: Bool) -> AXUIElement? {
+        let windows = all(bundleID)
+        guard let title = f.title else { return fallback ? front(bundleID) : nil }
+        func titled(_ t: String) -> AXUIElement? { windows.first { AX.string($0, kAXTitleAttribute) == t } }
+
+        if bundleID == Terminal.bundleID, let tty = f.tty,
+           let now = Terminal.windowName(tty: tty), let w = titled(now) { return w }
+        if let w = titled(title) { return w }
+        let head = firstPart(title)
+        if !head.isEmpty, let w = windows.first(where: { firstPart(AX.string($0, kAXTitleAttribute) ?? "") == head }) {
+            return w
+        }
+        return fallback && windows.count == 1 ? windows[0] : nil
+    }
+
+    private static func firstPart(_ title: String) -> String {
+        title.components(separatedBy: " — ").first?.trimmingCharacters(in: .whitespaces) ?? ""
+    }
+}
+
+/// Terminal windows have no document, but each tab has a tty that stays the same while
+/// Terminal is running.
+@MainActor
+enum Terminal {
+    static let bundleID = "com.apple.Terminal"
+
+    static func tty(windowNamed name: String) -> String? {
+        ask("""
+        tell application "Terminal"
+            repeat with w in windows
+                if name of w is "\(Brave.escape(name))" then return tty of selected tab of w
+            end repeat
+        end tell
+        return ""
+        """)
+    }
+
+    static func windowName(tty: String) -> String? {
+        ask("""
+        tell application "Terminal"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if tty of t is "\(Brave.escape(tty))" then return name of w
+                end repeat
+            end repeat
+        end tell
+        return ""
+        """)
+    }
+
+    private static func ask(_ source: String) -> String? {
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty else { return nil }
+        var error: NSDictionary?
+        let result = NSAppleScript(source: source)?.executeAndReturnError(&error).stringValue
+        if let error { Log.write("  [terminal] \(error[NSAppleScript.errorMessage] ?? error)") }
+        return (result?.isEmpty ?? true) ? nil : result
     }
 }
 
