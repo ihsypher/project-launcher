@@ -491,6 +491,10 @@ enum AX {
     }
 
     static func setFrame(_ window: AXUIElement, _ rect: CGRect) {
+        // Already there (layouts are applied several times while a project opens).
+        if !isMinimized(window), let now = frame(of: window),
+           abs(now.minX - rect.minX) < 2, abs(now.minY - rect.minY) < 2,
+           abs(now.width - rect.width) < 2, abs(now.height - rect.height) < 2 { return }
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         var pos = rect.origin
         var size = rect.size

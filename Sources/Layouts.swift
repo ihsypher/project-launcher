@@ -89,11 +89,12 @@ enum Layouts {
         }
     }
 
-    /// Windows take a moment to appear after opening, so apply twice,
-    /// unless the project has been closed again in the meantime.
+    /// Windows take a moment to appear after opening, so apply a few times as they do
+    /// (at 0.3s, 0.6s, 1s, 1.5s, 2.5s and 4s), unless the project has been closed again
+    /// in the meantime. Windows already in place don't move.
     static func applySoon(_ frames: [SavedFrame], while stillOpen: @escaping @MainActor () -> Bool) {
         Task { @MainActor in
-            for delay in [1.5, 2.0] {
+            for delay in [0.3, 0.3, 0.4, 0.5, 1.0, 1.5] {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 guard stillOpen() else { return }
                 apply(frames)
