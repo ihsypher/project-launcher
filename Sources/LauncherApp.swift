@@ -124,16 +124,10 @@ struct ProjectToggle: View {
         }
     }
 
-    /// e.g. "ANIHC  (due in 3 days, 1h 20m today)"
+    /// e.g. "ANIHC  (due in 3 days)"
     private var label: String {
-        var extras: [String] = []
-        if let d = project.deadline { extras.append(deadlineText(d)) }
-        if store.isOpen(project) {
-            let today = project.timeSpent(since: Calendar.current.startOfDay(for: Date()))
-            extras.append("\(formatDuration(today)) today")
-            if store.isPaused(project) { extras.append("paused") }
-        }
-        return extras.isEmpty ? project.name : "\(project.name)  (\(extras.joined(separator: ", ")))"
+        guard let d = project.deadline else { return project.name }
+        return "\(project.name)  (\(deadlineText(d)))"
     }
 }
 
@@ -152,18 +146,11 @@ struct GroupMenu: View {
         }
     }
 
-    /// e.g. "Radiation  (1 open, 2h 10m today, next due in 3 days)"
+    /// e.g. "Radiation  (due in 3 days)", from the soonest deadline in the group.
     private func label(_ members: [Project]) -> String {
-        var extras: [String] = []
-        let open = members.filter { store.isOpen($0) }.count
-        if open > 0 { extras.append("\(open) open") }
         let startOfDay = Calendar.current.startOfDay(for: Date())
-        let today = store.groupTime(group.id, since: startOfDay)
-        if today >= 60 { extras.append("\(formatDuration(today)) today") }
-        if let next = members.compactMap(\.deadline).filter({ $0 >= startOfDay }).min() {
-            extras.append("next \(deadlineText(next))")
-        }
-        return extras.isEmpty ? group.name : "\(group.name)  (\(extras.joined(separator: ", ")))"
+        guard let soonest = members.compactMap(\.deadline).filter({ $0 >= startOfDay }).min() else { return group.name }
+        return "\(group.name)  (\(deadlineText(soonest)))"
     }
 }
 

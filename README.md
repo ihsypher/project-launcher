@@ -4,9 +4,9 @@ A menu-bar app. One click opens a project's files, its Brave window and its Clau
 
 ## Menu
 
-- **Project names**: click to open (tick appears) or close. Opening a project closes the others first, so each starts fresh (hold **Option** to keep them open; anything both use stays open). Shows the deadline, plus time today while the project is open.
+- **Project names**: click to open (tick appears) or close. Opening a project closes the others first, so each starts fresh (hold **Option** to keep them open; anything both use stays open). Shows when it's due.
 - **Archive**: right-click a finished project (or use its Archived switch) to hide it from the menu and Raycast. Its time still counts towards its group.
-- **Groups**: put projects in a named group (e.g. Radiation, holding Assignment 1 and Assignment 2). A group shows as a submenu, with how many are open, time today and the next deadline. Select a group in Edit Projects to see its total time. Groups are just a name: files, links and deadlines belong to the projects.
+- **Groups**: put projects in a named group (e.g. Radiation, holding Assignment 1 and Assignment 2). A group shows as a submenu, with when its soonest project is due. Select a group in Edit Projects to see its total time. Groups are just a name: files, links and deadlines belong to the projects.
 - **Checks**: 5 seconds after opening or closing a project, Project Launcher checks everything opened or closed. If not, the menu-bar icon turns into a warning and the menu shows what's wrong, with **Try Again**, **Quit Word/Excel** (for documents that wouldn't close), **Show Log** and **Dismiss**. Windows asking to save don't count as problems.
 - **Save Window Positions**: remembers where each open project's windows are, for the screens you have connected right now.
 - **New Project from What's Open**: makes a project from the documents, apps (e.g. Terminal, MATLAB), named Brave window and Claude chat you have open, with their current layout. You tick which apps belong first; everyday apps like Messages and Spotify start unticked. Captured apps **minimise** the project's window when the project closes (other windows of the app are left alone); in Edit Projects each app can instead **Quit** or **Hide** (all its windows). Claude minimises its window by default too (or Hide, Quit, Leave it), and Brave windows always minimise.
@@ -52,7 +52,7 @@ Each rebuild gets a new ad-hoc signature, so macOS can forget the permissions. S
 
 - Word, Excel and PowerPoint files can be set (in Edit Projects) to **Quit Word/Excel** when the project closes, instead of just closing the file. It's skipped if another open project uses the same app, and the app still asks about any other unsaved documents.
 - Closing a project asks each app to close the project's documents (pressing the window's close button for apps that can't be asked), so apps still ask before discarding unsaved changes. MATLAB can't close a single file, so MATLAB files quit, hide or minimise MATLAB instead.
-- Time is counted while a project is ticked, and pauses while the Mac sleeps or you're away (no keyboard or mouse for 10 minutes by default, back-dated to when you were last active; change it in Settings). The menu shows "paused" until you're back.
+- Time is counted while a project is ticked, and pauses while the Mac sleeps or you're away (no keyboard or mouse for 10 minutes by default, back-dated to when you were last active; change it in Settings).
 - An app's saved position belongs to one of its windows (matched by title, and for Terminal by its session), so with several Terminal windows open the project's own one is un-minimised and moved, not whichever is in front.
 - Layouts are stored per screen setup, so the laptop-only and external-monitor arrangements don't overwrite each other.
 - Projects are saved in `~/Library/Application Support/ProjectLauncher/projects.json`.
