@@ -142,15 +142,8 @@ struct GroupMenu: View {
             if members.isEmpty { Text("No projects in this group") }
             ForEach(members) { ProjectToggle(project: $0) }
         } label: {
-            Label(label(members), systemImage: "folder")
+            Label(group.name, systemImage: "folder")
         }
-    }
-
-    /// e.g. "Radiation  (due in 3 days)", from the soonest deadline in the group.
-    private func label(_ members: [Project]) -> String {
-        let startOfDay = Calendar.current.startOfDay(for: Date())
-        guard let soonest = members.compactMap(\.deadline).filter({ $0 >= startOfDay }).min() else { return group.name }
-        return "\(group.name)  (\(deadlineText(soonest)))"
     }
 }
 
