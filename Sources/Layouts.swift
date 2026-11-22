@@ -77,7 +77,7 @@ enum Layouts {
         let before = p.layouts[ScreenSetup.currentKey()] ?? []
         for path in p.files where isApp(path) {
             guard let id = Bundle(url: URL(fileURLWithPath: expandPath(path)))?.bundleIdentifier else { continue }
-            let saved = before.first { $0.kind == "app" && $0.key == path }
+            let saved = before.first { $0.kind == "app" && $0.key == path } ?? AppWindows.identity(of: path, in: p)
             let found = saved.flatMap { AppWindows.find(id, $0, fallback: false) }
             guard let w = found ?? AppWindows.front(id), let r = AX.frame(of: w) else { continue }
             var f = SavedFrame(kind: "app", key: path, rect: r)
@@ -199,9 +199,16 @@ enum AppWindows {
     /// The windows a project uses: the one it saved a position for, or else every window
     /// (it can't tell which one is the project's).
     static func projectWindows(_ bundleID: String, path: String, in p: Project) -> [AXUIElement] {
-        let saved = p.layouts[ScreenSetup.currentKey()]?.first { $0.kind == "app" && $0.key == path }
-        if let saved, saved.title != nil { return find(bundleID, saved, fallback: false).map { [$0] } ?? [] }
+        if let saved = identity(of: path, in: p) { return find(bundleID, saved, fallback: false).map { [$0] } ?? [] }
         return all(bundleID)
+    }
+
+    /// Which window of an app is the project's: from the layout for these screens, or any other
+    /// screen setup's if there isn't one here (the window is the same, only its position differs).
+    static func identity(of path: String, in p: Project) -> SavedFrame? {
+        let current = ScreenSetup.currentKey()
+        let layouts = [p.layouts[current] ?? []] + p.layouts.filter { $0.key != current }.map(\.value)
+        return layouts.lazy.compactMap { $0.first { $0.kind == "app" && $0.key == path && $0.title != nil } }.first
     }
 
     private static func firstPart(_ title: String) -> String {

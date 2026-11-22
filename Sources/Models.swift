@@ -225,8 +225,8 @@ final class ProjectStore: ObservableObject {
             }
         }
         problems[p.id] = nil
-        Launcher.open(p, stillOpen: { [weak self] in self?.openIDs.contains(p.id) ?? false })
         openIDs.insert(p.id)
+        Launcher.open(p, stillOpen: { [weak self] in self?.openIDs.contains(p.id) ?? false })
         let now = Date()
         update(p.id) { $0.activeSession = ActiveSession(start: now, lastBeat: now) }
         scheduleCheck(p.id, opened: true)
