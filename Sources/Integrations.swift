@@ -49,7 +49,15 @@ enum RaycastScripts {
         UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true
     }
 
-    static func sync(projects: [Project], groups: [ProjectGroup]) {
+    /// What the commands show, so saves that only change time skip the folder.
+    private static var lastShown: [String]?
+
+    static func sync(projects: [Project], groups: [ProjectGroup], force: Bool = false) {
+        let shown = [String(isEnabled)] + projects.filter { !$0.archived }.map { p in
+            [p.id.uuidString, p.name, p.icon, p.color, groups.first { $0.id == p.groupID }?.name ?? ""].joined(separator: "\u{1F}")
+        }
+        guard force || shown != lastShown else { return }
+        lastShown = shown
         let fm = FileManager.default
         guard isEnabled else {
             try? fm.removeItem(at: folder)

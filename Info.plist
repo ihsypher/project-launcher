@@ -2,38 +2,38 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key>
-    <string>ProjectLauncher</string>
-    <key>CFBundleIdentifier</key>
-    <string>local.ihsaan.projectlauncher</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleName</key>
-    <string>Project Launcher</string>
-    <key>CFBundleDisplayName</key>
-    <string>Project Launcher</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.34</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>local.ihsaan.projectlauncher</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>projectlauncher</string>
-            </array>
-        </dict>
-    </array>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>Project Launcher controls Brave, Word, Excel and PowerPoint so it can find, arrange and minimise your project windows.</string>
+	<key>CFBundleDisplayName</key>
+	<string>Project Launcher</string>
+	<key>CFBundleExecutable</key>
+	<string>ProjectLauncher</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.ihsaan.projectlauncher</string>
+	<key>CFBundleName</key>
+	<string>Project Launcher</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.35</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>local.ihsaan.projectlauncher</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>projectlauncher</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Project Launcher controls Brave, Word, Excel and PowerPoint so it can find, arrange and minimise your project windows.</string>
 </dict>
 </plist>

@@ -190,6 +190,8 @@ final class ProjectStore: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.heartbeat() }
         }
+        // Leeway lets macOS wake for these together with other work, saving battery.
+        timer?.tolerance = 10
         // Look for updates shortly after launch, then every 4 hours.
         DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
             MainActor.assumeIsolated { self?.checkForUpdates() }
@@ -197,6 +199,7 @@ final class ProjectStore: ObservableObject {
         updateTimer = Timer.scheduledTimer(withTimeInterval: 4 * 3600, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.checkForUpdates() }
         }
+        updateTimer?.tolerance = 600
     }
 
     func checkForUpdates() {
@@ -383,6 +386,7 @@ final class ProjectStore: ObservableObject {
         resumeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.resumeIfBack() }
         }
+        resumeTimer?.tolerance = 1
     }
 
     private func resumeIfBack() {
@@ -714,6 +718,7 @@ final class ProjectStore: ObservableObject {
 
     /// Saving waits until changes stop for a moment (e.g. while typing a name), then writes once.
     private var pendingSave: DispatchWorkItem?
+    private var savedGroups: Data?
 
     private func save() {
         pendingSave?.cancel()
@@ -736,8 +741,9 @@ final class ProjectStore: ObservableObject {
         if let data = try? encoder.encode(projects) {
             try? data.write(to: fileURL, options: .atomic)
         }
-        if let data = try? encoder.encode(groups) {
+        if let data = try? encoder.encode(groups), data != savedGroups {
             try? data.write(to: groupsURL, options: .atomic)
+            savedGroups = data
         }
         RaycastScripts.sync(projects: projects, groups: groups)
     }

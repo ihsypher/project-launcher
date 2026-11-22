@@ -349,12 +349,12 @@ struct SettingsView: View {
                 Section {
                     Toggle("Raycast commands", isOn: Binding(
                         get: { raycast },
-                        set: { raycast = $0; RaycastScripts.sync(projects: store.projects, groups: store.groups) }
+                        set: { raycast = $0; RaycastScripts.sync(projects: store.projects, groups: store.groups, force: true) }
                     ))
                     if raycast {
                         HStack {
                             Button("Show Folder") {
-                                RaycastScripts.sync(projects: store.projects, groups: store.groups)
+                                RaycastScripts.sync(projects: store.projects, groups: store.groups, force: true)
                                 NSWorkspace.shared.activateFileViewerSelecting([RaycastScripts.folder])
                             }
                             Button("Copy Folder Path") {
