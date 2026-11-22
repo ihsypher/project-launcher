@@ -154,7 +154,7 @@ final class ProjectStore: ObservableObject {
     }
     /// Named groups of projects (e.g. "Radiation"), shown as submenus.
     @Published var groups: [ProjectGroup] = [] {
-        didSet { saveGroups() }
+        didSet { save() }
     }
     /// Which projects are currently "open" (ticked).
     @Published private(set) var openIDs: Set<UUID> = []
@@ -183,6 +183,9 @@ final class ProjectStore: ObservableObject {
         finishStaleSessions()
         Backups.makeIfDue()
         RaycastScripts.sync(projects: projects, groups: groups)
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flushSave() }
+        }
         URLEvents.shared.handler = { [weak self] url in self?.handle(url) }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.heartbeat() }
@@ -395,6 +398,7 @@ final class ProjectStore: ObservableObject {
     /// log up to the last beat and start a fresh session from now.
     func heartbeat() {
         pauseIfAway()
+        flushSave()
         Backups.makeIfDue()
         let now = Date()
         var copy = projects
@@ -546,6 +550,7 @@ final class ProjectStore: ObservableObject {
         guard Alerts.confirm("Restore \(restored.count) projects from \(folder.lastPathComponent)?",
                              "This replaces your \(projects.count) current projects and their time logs. They're backed up first, so you can restore them again if needed.",
                              ok: "Restore") else { return }
+        flushSave()
         Backups.make(note: " (before restore)")
         Log.write("RESTORE from \(folder.path)")
         editorSelection = nil
@@ -702,18 +707,30 @@ final class ProjectStore: ObservableObject {
         projects = copy
     }
 
+    /// Saving waits until changes stop for a moment (e.g. while typing a name), then writes once.
+    private var pendingSave: DispatchWorkItem?
+
     private func save() {
+        pendingSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveNow() }
+        pendingSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// Writes any change still waiting (before quitting or backing up).
+    func flushSave() {
+        guard let work = pendingSave, !work.isCancelled else { return }
+        work.cancel()
+        saveNow()
+    }
+
+    private func saveNow() {
+        pendingSave = nil
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? encoder.encode(projects) {
             try? data.write(to: fileURL, options: .atomic)
         }
-        RaycastScripts.sync(projects: projects, groups: groups)
-    }
-
-    private func saveGroups() {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? encoder.encode(groups) {
             try? data.write(to: groupsURL, options: .atomic)
         }
@@ -754,6 +771,26 @@ func expandPath(_ path: String) -> String {
     (path as NSString).expandingTildeInPath
 }
 
+/// The app that opens a file or link by default. Asking macOS is slow-ish and the menu and
+/// editor ask often, so answers are remembered for a few minutes.
+func defaultApp(for url: URL) -> URL? {
+    let key = url.absoluteString as NSString
+    if let hit = AppLookupCache.shared.object(forKey: key), hit.time.timeIntervalSinceNow > -300 { return hit.app }
+    let app = NSWorkspace.shared.urlForApplication(toOpen: url)
+    AppLookupCache.shared.setObject(AppLookup(app: app), forKey: key)
+    return app
+}
+
+final class AppLookup {
+    let app: URL?
+    let time = Date()
+    init(app: URL?) { self.app = app }
+}
+
+enum AppLookupCache {
+    static let shared = NSCache<NSString, AppLookup>()
+}
+
 func isApp(_ path: String) -> Bool {
     (path as NSString).pathExtension.lowercased() == "app"
 }
@@ -767,7 +804,7 @@ private let wholeAppDocumentApps: Set<String> = ["com.mathworks.matlab"]
 func wholeAppBundleID(_ path: String) -> String? {
     let url = URL(fileURLWithPath: expandPath(path))
     if isApp(path) { return Bundle(url: url)?.bundleIdentifier }
-    guard let appURL = NSWorkspace.shared.urlForApplication(toOpen: url),
+    guard let appURL = defaultApp(for: url),
           let id = Bundle(url: appURL)?.bundleIdentifier, wholeAppDocumentApps.contains(id) else { return nil }
     return id
 }
@@ -776,7 +813,7 @@ func wholeAppBundleID(_ path: String) -> String? {
 func appBundleID(_ path: String) -> String? {
     let url = URL(fileURLWithPath: expandPath(path))
     if isApp(path) { return Bundle(url: url)?.bundleIdentifier }
-    return NSWorkspace.shared.urlForApplication(toOpen: url).flatMap { Bundle(url: $0)?.bundleIdentifier }
+    return defaultApp(for: url).flatMap { Bundle(url: $0)?.bundleIdentifier }
 }
 
 let officeAppIDs: Set<String> = ["com.microsoft.Word", "com.microsoft.Excel", "com.microsoft.Powerpoint"]

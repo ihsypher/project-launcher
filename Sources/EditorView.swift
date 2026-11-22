@@ -391,6 +391,7 @@ struct SettingsView: View {
                 Section {
                     HStack {
                         Button("Back Up Now") {
+                            store.flushSave()
                             Backups.make()
                             backupStatus = Backups.lastBackupText()
                         }
@@ -805,7 +806,7 @@ struct ProjectDetail: View {
 
     /// e.g. "MATLAB" for a .m file.
     private func appName(for path: String) -> String {
-        guard let url = NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: expandPath(path))) else { return "App" }
+        guard let url = defaultApp(for: URL(fileURLWithPath: expandPath(path))) else { return "App" }
         let name = FileManager.default.displayName(atPath: url.path)
         return name.hasPrefix("MATLAB") ? "MATLAB" : (name as NSString).deletingPathExtension
     }

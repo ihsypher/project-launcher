@@ -140,7 +140,7 @@ enum ClaudeApp {
     /// Bundle ID of whichever app handles claude:// links (the Claude desktop app).
     static func bundleID() -> String? {
         guard let probe = URL(string: "claude://claude.ai/new"),
-              let appURL = NSWorkspace.shared.urlForApplication(toOpen: probe) else { return nil }
+              let appURL = defaultApp(for: probe) else { return nil }
         return Bundle(url: appURL)?.bundleIdentifier
     }
 
@@ -605,19 +605,35 @@ enum AX {
 
     /// Windows showing any of the given files, each paired with the path as stored in the project.
     /// Looks in every running app, since a file may be open in something other than its default app.
-    static func documentWindows(files: [String]) -> [(path: String, window: AXUIElement)] {
+    ///
+    /// Unless `everywhere`, only the file's default app and any app it was found in before are
+    /// searched (every app if it's never been found), so repeated quick checks stay quick.
+    /// The first and last close attempts and the check afterwards search everywhere, so a file
+    /// opened in some other app isn't missed.
+    static func documentWindows(files: [String], everywhere: Bool = false) -> [(path: String, window: AXUIElement)] {
         let targets = files.map { ($0, URL(fileURLWithPath: expandPath($0)).resolvingSymlinksInPath()) }
+        var apps: Set<String> = []
+        var everyApp = everywhere
+        for f in files {
+            if let id = appBundleID(f) { apps.insert(id) }
+            if let id = foundIn[f] { apps.insert(id) } else { everyApp = true }
+        }
         var result: [(path: String, window: AXUIElement)] = []
         for app in NSWorkspace.shared.runningApplications
-        where app.activationPolicy == .regular && app.processIdentifier != getpid() {
+        where app.activationPolicy == .regular && app.processIdentifier != getpid()
+            && (everyApp || apps.contains(app.bundleIdentifier ?? "")) {
             for w in windows(pid: app.processIdentifier) {
                 if let path = matchingPath(w, targets) {
                     result.append((path: path, window: w))
+                    foundIn[path] = app.bundleIdentifier
                 }
             }
         }
         return result
     }
+
+    /// The app each file was last seen open in (it may not be the file's default app).
+    private static var foundIn: [String: String] = [:]
 
     /// Addresses of the web pages inside a window (for Electron apps such as Claude).
     static func webAreaURLs(in window: AXUIElement) -> [URL] {
@@ -710,12 +726,12 @@ enum WindowCloser {
         let seen = Seen()
         closeOfficeDocuments(files, seen)
         closeWithScripting(files, seen)
-        pressAll(files, seen, pass: "0s")
+        pressAll(files, seen, pass: "0s", everywhere: true)
         for (i, delay) in retryDelays.enumerated() {
             let last = i == retryDelays.count - 1
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 MainActor.assumeIsolated {
-                    pressAll(files, seen, pass: "\(delay)s")
+                    pressAll(files, seen, pass: "\(delay)s", everywhere: last)
                     if last { closeOfficeLeftovers(files, skipping: seen.paths) }
                 }
             }
@@ -736,8 +752,8 @@ enum WindowCloser {
     /// leaving its window up meanwhile, and pressing that window again brings it back.
     /// (Checked by file, not window: Word hands out a new window reference each time.
     /// Closing one Preview tab brings the next one, a different file, forward to be pressed.)
-    private static func pressAll(_ files: [String], _ seen: Seen, pass: String) {
-        let found = AX.documentWindows(files: files)
+    private static func pressAll(_ files: [String], _ seen: Seen, pass: String, everywhere: Bool) {
+        let found = AX.documentWindows(files: files, everywhere: everywhere)
         if found.isEmpty { Log.write("  [\(pass)] no matching windows") }
         for item in found {
             seen.paths.insert(item.path)
@@ -793,7 +809,7 @@ enum WindowCloser {
                 byApp[id, default: []].insert(f)
             }
         }
-        for item in AX.documentWindows(files: docs) {
+        for item in AX.documentWindows(files: docs, everywhere: true) {
             var pid: pid_t = 0
             AXUIElementGetPid(item.window, &pid)
             if let id = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier {
@@ -861,7 +877,7 @@ enum Verify {
     static func afterClose(_ p: Project, keepRunning: Set<String>) -> [Issue] {
         var issues: [Issue] = []
         let docs = p.files.filter { wholeAppBundleID($0) == nil }
-        let waiting = Set(AX.documentWindows(files: docs).filter { AX.hasSheet($0.window) }.map(\.path))
+        let waiting = Set(AX.documentWindows(files: docs, everywhere: true).filter { AX.hasSheet($0.window) }.map(\.path))
         for f in openDocuments(docs) where !waiting.contains(f) {
             let app = appBundleID(f)
             issues.append(Issue(text: "\(name(f)) is still open",
@@ -890,7 +906,7 @@ enum Verify {
         func resolved(_ path: String) -> String {
             URL(fileURLWithPath: expandPath(path)).resolvingSymlinksInPath().path
         }
-        var open = Set(AX.documentWindows(files: files).map(\.path))
+        var open = Set(AX.documentWindows(files: files, everywhere: true).map(\.path))
         let elsewhere = Set((Office.openDocumentPaths() + Scripting.previewDocumentPaths()).map(resolved))
         for f in files where elsewhere.contains(resolved(f)) { open.insert(f) }
         return open
