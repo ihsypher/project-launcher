@@ -437,6 +437,7 @@ final class ProjectStore: ObservableObject {
     // MARK: Layouts and capture
 
     func saveLayoutsForOpenProjects() {
+        ScreenSetup.nameCurrentIfNeeded()
         let key = ScreenSetup.currentKey()
         var lines: [String] = []
         for p in projects where openIDs.contains(p.id) {
@@ -448,8 +449,8 @@ final class ProjectStore: ObservableObject {
             update(p.id) { $0.layouts[key] = frames }
             lines.append("\(p.name): \(frames.count) window\(frames.count == 1 ? "" : "s")")
         }
-        Alerts.show("Layout saved for this screen setup",
-                    "Screens: \(key)\n\n" + lines.joined(separator: "\n")
+        Alerts.show("Saved for \(ScreenSetup.label(key))",
+                    lines.joined(separator: "\n")
                     + "\n\nNext time you open these projects with the same screens, the windows go back to these positions.")
     }
 

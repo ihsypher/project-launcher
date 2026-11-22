@@ -13,6 +13,44 @@ enum ScreenSetup {
             .sorted()
             .joined(separator: " + ")
     }
+
+    static let namesKey = "screenSetupNames"
+
+    /// The name you gave a screen setup, e.g. "Laptop" or "Desk".
+    static func name(_ key: String) -> String? {
+        let names = UserDefaults.standard.dictionary(forKey: namesKey) as? [String: String] ?? [:]
+        return names[key].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    static func setName(_ name: String, for key: String) {
+        var names = UserDefaults.standard.dictionary(forKey: namesKey) as? [String: String] ?? [:]
+        names[key] = name.trimmingCharacters(in: .whitespaces)
+        UserDefaults.standard.set(names, forKey: namesKey)
+    }
+
+    /// Its name, or a description if it hasn't got one.
+    static func label(_ key: String) -> String {
+        name(key) ?? (key.contains(" + ") ? "\(key.components(separatedBy: " + ").count) screens" : "Single screen")
+    }
+
+    /// Asks for a name for the screens connected now, the first time a layout is saved for them.
+    static func nameCurrentIfNeeded() {
+        let key = currentKey()
+        guard name(key) == nil else { return }
+        let laptopOnly = !key.contains(" + ") && key.contains("Built-in")
+        if let name = Alerts.askText("Name these screens",
+                                     "Layouts are saved separately for each screen setup, and chosen automatically when you open a project. A name helps you tell them apart.\n\nScreens: \(key)",
+                                     suggestion: laptopOnly ? "Laptop" : "Desk", okTitle: "Save", cancelTitle: "Skip") {
+            setName(name, for: key)
+        }
+    }
+
+    /// Every screen setup with a saved layout, plus the current one.
+    static func known(in projects: [Project]) -> [String] {
+        var keys = Set(projects.flatMap { $0.layouts.keys })
+        keys.insert(currentKey())
+        return keys.sorted { label($0) < label($1) }
+    }
 }
 
 // MARK: - Saving and restoring window positions

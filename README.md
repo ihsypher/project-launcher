@@ -54,7 +54,8 @@ Each rebuild gets a new ad-hoc signature, so macOS can forget the permissions. S
 - Closing a project asks each app to close the project's documents (pressing the window's close button for apps that can't be asked), so apps still ask before discarding unsaved changes. MATLAB can't close a single file, so MATLAB files quit, hide or minimise MATLAB instead.
 - Time is counted while a project is ticked, and pauses while the Mac sleeps or you're away (no keyboard or mouse for 10 minutes by default, back-dated to when you were last active; change it in Settings).
 - An app's saved position belongs to one of its windows (matched by title, and for Terminal by its session), so with several Terminal windows open the project's own one is un-minimised and moved, not whichever is in front.
-- Layouts are stored per screen setup, so the laptop-only and external-monitor arrangements don't overwrite each other.
+- Layouts are stored per screen setup (the screens connected), and the right one is used automatically when you open a project, so laptop-only and desk arrangements don't overwrite each other. You're asked to name a setup (e.g. Laptop, Desk) the first time you save for it; rename them in Settings > Screen setups.
+- After closing a project, Claude is switched to a new chat and made to fill the screen before it's minimised, so opening Claude by itself later starts fresh. Turn off in Settings.
 - Projects are saved in `~/Library/Application Support/ProjectLauncher/projects.json`.
 - Backups: your projects, groups and time are backed up once a day to iCloud Drive > Project Launcher Backups (or Application Support if iCloud Drive is off), keeping the last 30. Edit Projects > gear icon > Backups has **Back Up Now**, **Show Backups** and **Restore…** (which backs up the current list first).
 - Start at login: Edit Projects > gear icon > **Open Project Launcher at login**.

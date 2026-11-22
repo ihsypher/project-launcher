@@ -186,8 +186,42 @@ enum ClaudeApp {
         return AX.firstWindow(bundleID: id)
     }
 
+    static let freshOnCloseKey = "claudeFreshOnClose"
+
+    /// With the setting on (default), Claude is first switched to a new chat and made to fill
+    /// the screen, so opening it by itself later starts fresh rather than on the project's chat.
     static func close(mode: String) {
-        guard mode != "leave", let bundleID = bundleID() else { return }
+        guard mode != "leave", bundleID() != nil else { return }
+        let fresh = UserDefaults.standard.object(forKey: freshOnCloseKey) as? Bool ?? true
+        guard fresh, mode != "quit", let home = URL(string: "claude://claude.ai/new") else {
+            putAway(mode: mode)
+            return
+        }
+        Log.write("  Claude: new chat, fill screen")
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = false
+        NSWorkspace.shared.open(home, configuration: config)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            MainActor.assumeIsolated {
+                fillScreen()
+                putAway(mode: mode)
+            }
+        }
+    }
+
+    /// Makes the main window fill its screen (not full screen mode, which can't be minimised).
+    private static func fillScreen() {
+        guard let w = mainWindow(), let f = AX.frame(of: w),
+              let primaryHeight = NSScreen.screens.first?.frame.height else { return }
+        // Window frames are measured from the top left of the main screen, NSScreen's from the bottom left.
+        let centre = CGPoint(x: f.midX, y: primaryHeight - f.midY)
+        guard let visible = (NSScreen.screens.first { $0.frame.contains(centre) } ?? NSScreen.main)?.visibleFrame else { return }
+        AX.setFrame(w, CGRect(x: visible.minX, y: primaryHeight - visible.maxY,
+                              width: visible.width, height: visible.height))
+    }
+
+    private static func putAway(mode: String) {
+        guard let bundleID = bundleID() else { return }
         Log.write("  \(mode) Claude")
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
         if mode == "minimise" {

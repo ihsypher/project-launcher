@@ -323,6 +323,8 @@ struct SettingsView: View {
     @EnvironmentObject var store: ProjectStore
     @State private var openAtLogin = LoginItem.isEnabled
     @State private var backupStatus = Backups.lastBackupText()
+    @AppStorage(ClaudeApp.freshOnCloseKey) private var claudeFresh = true
+    @State private var screenNames: [String: String] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -333,6 +335,7 @@ struct SettingsView: View {
                         Text("Never").tag(0)
                         ForEach([5, 10, 15, 30], id: \.self) { Text("\($0) minutes").tag($0) }
                     }
+                    Toggle("Leave Claude on a new chat, filling the screen, after closing a project", isOn: $claudeFresh)
                     Toggle("Open Project Launcher at login", isOn: Binding(
                         get: { openAtLogin },
                         set: { LoginItem.set($0); openAtLogin = LoginItem.isEnabled }
@@ -365,6 +368,24 @@ struct SettingsView: View {
                     Label("Raycast", systemImage: "magnifyingglass")
                 } footer: {
                     Text("Search any project in Raycast to open or close it. Setup once: Raycast Settings > Extensions > + > Add Script Directory, then Cmd-Shift-G and paste the path.")
+                }
+
+                Section {
+                    ForEach(ScreenSetup.known(in: store.projects), id: \.self) { key in
+                        TextField(text: Binding(
+                            get: { screenNames[key] ?? ScreenSetup.name(key) ?? "" },
+                            set: { screenNames[key] = $0; ScreenSetup.setName($0, for: key) }
+                        ), prompt: Text(ScreenSetup.label(key))) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(key == ScreenSetup.currentKey() ? "Connected now" : "Screen setup")
+                                Text(key).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } header: {
+                    Label("Screen setups", systemImage: "display.2")
+                } footer: {
+                    Text("Each project keeps a window layout per screen setup, picked automatically when you open it. Name them (e.g. Laptop, Desk) to tell them apart.")
                 }
 
                 Section {
@@ -414,7 +435,7 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 500, height: 660)
+        .frame(width: 560, height: 720)
     }
 
     private func restore() {
@@ -671,8 +692,8 @@ struct ProjectDetail: View {
                     ForEach(layoutKeys, id: \.self) { key in
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(key == currentScreens ? "This screen setup" : "Other screen setup")
-                                Text("\(key), \(project.layouts[key]?.count ?? 0) windows")
+                                Text(ScreenSetup.label(key) + (key == currentScreens ? " (connected now)" : ""))
+                                Text("\(project.layouts[key]?.count ?? 0) windows · \(key)")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -692,7 +713,7 @@ struct ProjectDetail: View {
                 } header: {
                     Label("Window layouts", systemImage: "rectangle.split.3x1")
                 } footer: {
-                    Text("Arrange the windows, then save. Laptop-only and external-monitor setups are kept separately.")
+                    Text("Arrange the windows, then save. Each screen setup keeps its own layout, chosen automatically. Rename setups in Settings.")
                 }
                 Section {
                     Button("Reset Time Log…", role: .destructive) { confirmReset = true }
@@ -751,8 +772,9 @@ struct ProjectDetail: View {
         if frames.isEmpty {
             layoutMessage = "No windows found. Open the project first."
         } else {
+            ScreenSetup.nameCurrentIfNeeded()
             project.layouts[currentScreens] = frames
-            layoutMessage = "Saved \(frames.count) window\(frames.count == 1 ? "" : "s")."
+            layoutMessage = "Saved \(frames.count) window\(frames.count == 1 ? "" : "s") for \(ScreenSetup.label(currentScreens))."
         }
     }
 
