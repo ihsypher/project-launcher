@@ -11,7 +11,13 @@ enum Launcher {
         var missing: [String] = []
         for path in p.files {
             let full = expandPath(path)
-            if FileManager.default.fileExists(atPath: full) {
+            if let app = runningAppWithKnownWindow(path, in: p) {
+                // "Opening" a running app makes it bring back a minimised window of its own
+                // choosing (e.g. another Terminal window). Its project window is restored below,
+                // so just switch to it.
+                app.unhide()
+                app.activate()
+            } else if FileManager.default.fileExists(atPath: full) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: full))
             } else {
                 missing.append(path)
@@ -48,6 +54,15 @@ enum Launcher {
         }
         // Then keep putting windows in place as they appear (documents, new windows).
         if !frames.isEmpty { Layouts.applySoon(frames, while: stillOpen) }
+    }
+
+    /// A project app that's already running and whose project window is known and still there.
+    private static func runningAppWithKnownWindow(_ path: String, in p: Project) -> NSRunningApplication? {
+        guard isApp(path), let id = wholeAppBundleID(path),
+              let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first,
+              let saved = AppWindows.identity(of: path, in: p),
+              AppWindows.find(id, saved, fallback: false) != nil else { return nil }
+        return app
     }
 
     /// `keepRunning`: bundle IDs of apps another open project still uses.
