@@ -22,9 +22,13 @@ enum Launcher {
                         "These may have been moved or renamed:\n\n" + missing.joined(separator: "\n"))
         }
         // Backup pages go with the first window, if it isn't open.
+        // Claude opens once Brave has finished (it runs in the background), so the chat ends up in front.
         let windows = p.braveWindowNames.isEmpty ? [""] : p.braveWindowNames
         for (i, name) in windows.enumerated() {
-            Brave.show(windowName: name, urls: i == 0 ? p.urls : [])
+            let last = i == windows.count - 1
+            Brave.show(windowName: name, urls: i == 0 ? p.urls : []) {
+                if last && stillOpen() { ClaudeApp.open(link: p.claudeLink) }
+            }
         }
         // Minimised app windows without a saved position (those are restored with the layout).
         let placed = Set((p.layouts[ScreenSetup.currentKey()] ?? []).filter { $0.kind == "app" }.map(\.key))
@@ -33,8 +37,6 @@ enum Launcher {
                 AppWindows.projectWindows(id, path: path, in: p).forEach { AX.setMinimized($0, false) }
             }
         }
-        // Claude last, so the chat ends up in front.
-        ClaudeApp.open(link: p.claudeLink)
         // Put windows back where they were saved for this screen setup.
         // (Only for files still in the project: a removed file's saved position is ignored.)
         if let frames = p.layouts[ScreenSetup.currentKey()]?.filter({ $0.kind != "file" || p.files.contains($0.key) }),
@@ -288,12 +290,13 @@ enum Brave {
 
     /// If a window with this name exists: un-minimise it and bring it to the front.
     /// Otherwise: open the URLs in a new window and try to give it the name.
-    static func show(windowName: String, urls: [String]) {
+    /// `then` runs once Brave has done it (or straight away if there's nothing to show).
+    static func show(windowName: String, urls: [String], then: (@MainActor () -> Void)? = nil) {
         let name = windowName.trimmingCharacters(in: .whitespaces)
         let cleanURLs = urls
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        if name.isEmpty && cleanURLs.isEmpty { return }
+        if name.isEmpty && cleanURLs.isEmpty { then?(); return }
 
         let urlList = "{" + cleanURLs.map { "\"\(escape($0))\"" }.joined(separator: ", ") + "}"
 
@@ -341,7 +344,32 @@ enum Brave {
             activate
         end tell
         """
-        AppleScriptRunner.run(script)
+        BackgroundScript.run(script, lane: "brave", timeout: 20, label: "show Brave window \(name)") { _, error in
+            then?()
+            if let error {
+                Alerts.show("Couldn't control Brave",
+                            error + "\n\nIf this mentions permission, allow Project Launcher in System Settings > Privacy & Security > Automation.")
+            }
+        }
+    }
+
+    /// The names of Brave's named windows, in the background (for the check after opening).
+    static func windowNamesInBackground(_ done: @escaping @MainActor (Set<String>) -> Void) {
+        guard isRunning else { return done([]) }
+        BackgroundScript.run("""
+        set out to ""
+        tell application "\(appName)"
+            repeat with w in windows
+                try
+                    set n to given name of w
+                    if n is not missing value and n is not "" then set out to out & n & linefeed
+                end try
+            end repeat
+        end tell
+        return out
+        """, lane: "brave", label: "Brave window names") { output, _ in
+            done(Set(BackgroundScript.lines(output)))
+        }
     }
 
     static let bundleID = "com.brave.Browser"
@@ -487,12 +515,65 @@ enum Brave {
             end tell
         end if
         """
-        AppleScriptRunner.run(script)
+        BackgroundScript.run(script, lane: "brave", label: "minimise Brave window \(windowName)")
     }
 
     static func escape(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\")
          .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+}
+
+/// Runs AppleScript in a separate osascript process, off the main thread, so an app that's
+/// slow to answer (Excel can take 15s+ to wake up) never freezes Project Launcher.
+/// Scripts in the same lane run one at a time, in order (e.g. Office's "which documents are
+/// open?" before its "close this one"); different lanes run side by side.
+enum BackgroundScript {
+    private static let lanes = ["office", "brave", "preview", "other"].reduce(into: [String: DispatchQueue]()) {
+        $0[$1] = DispatchQueue(label: "ProjectLauncher.script.\($1)", qos: .userInitiated)
+    }
+
+    /// `done` gets the script's result as text, or nil and the error (also logged), on the main thread.
+    static func run(_ source: String, lane: String, timeout: TimeInterval = 10, label: String,
+                    done: (@MainActor (_ output: String?, _ error: String?) -> Void)? = nil) {
+        (lanes[lane] ?? lanes["other"]!).async {
+            let (output, error) = execute(source, timeout: timeout)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let error { Log.write("  [script] \(label): \(error)") }
+                    done?(output, error)
+                }
+            }
+        }
+    }
+
+    private static func execute(_ source: String, timeout: TimeInterval) -> (String?, String?) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-"]
+        let input = Pipe(), output = Pipe(), errors = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = errors
+        do { try process.run() } catch { return (nil, error.localizedDescription) }
+        input.fileHandleForWriting.write(Data(source.utf8))
+        try? input.fileHandleForWriting.close()
+        let stop = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: stop)
+        let out = output.fileHandleForReading.readDataToEndOfFile()
+        let err = errors.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        stop.cancel()
+        if process.terminationReason == .uncaughtSignal { return (nil, "no answer after \(Int(timeout))s") }
+        if process.terminationStatus != 0 {
+            return (nil, String(decoding: err, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return (String(decoding: out, as: UTF8.self).trimmingCharacters(in: .newlines), nil)
+    }
+
+    /// Splits a result made of lines (scripts here return one item per line).
+    static func lines(_ text: String?) -> [String] {
+        (text ?? "").components(separatedBy: "\n").filter { !$0.isEmpty }
     }
 }
 
@@ -724,15 +805,21 @@ enum WindowCloser {
             return
         }
         let seen = Seen()
-        closeOfficeDocuments(files, seen)
-        closeWithScripting(files, seen)
-        pressAll(files, seen, pass: "0s", everywhere: true)
-        for (i, delay) in retryDelays.enumerated() {
-            let last = i == retryDelays.count - 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                MainActor.assumeIsolated {
-                    pressAll(files, seen, pass: "\(delay)s", everywhere: last)
-                    if last { closeOfficeLeftovers(files, skipping: seen.paths) }
+        // Office is asked which documents it has open first (in the background, as it can be
+        // slow to answer), so its documents are closed by Office and never pressed.
+        Office.openDocumentsInBackground { office in
+            closeOfficeDocuments(files, seen, open: office)
+            closeWithScripting(files, seen)
+            pressAll(files, seen, pass: "0s", everywhere: true)
+            for (i, delay) in retryDelays.enumerated() {
+                let last = i == retryDelays.count - 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    MainActor.assumeIsolated {
+                        pressAll(files, seen, pass: "\(delay)s", everywhere: last)
+                        if last {
+                            Office.openDocumentsInBackground { closeOfficeLeftovers(files, skipping: seen.paths, open: $0) }
+                        }
+                    }
                 }
             }
         }
@@ -775,10 +862,10 @@ enum WindowCloser {
     /// Word, Excel and PowerPoint documents are closed by asking the app itself, not by pressing
     /// the window's close button: on some Macs Word closes the document after a press but leaves
     /// its empty window stuck on screen. Marks them as handled so they aren't pressed too.
-    private static func closeOfficeDocuments(_ files: [String], _ seen: Seen) {
+    private static func closeOfficeDocuments(_ files: [String], _ seen: Seen, open: [Office.OpenDocument]) {
         var byPath: [String: String] = [:]
         for f in files { byPath[URL(fileURLWithPath: expandPath(f)).resolvingSymlinksInPath().path] = f }
-        let matches = Office.openDocuments().filter {
+        let matches = open.filter {
             byPath[URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path] != nil
         }
         guard !matches.isEmpty else { return }
@@ -831,11 +918,10 @@ enum WindowCloser {
     /// (e.g. full screen in another Space). Documents whose window already closed are skipped:
     /// Office can keep listing a OneDrive file while it uploads, and closing it again
     /// brings the window back blank.
-    private static func closeOfficeLeftovers(_ files: [String], skipping seen: Set<String>) {
+    private static func closeOfficeLeftovers(_ files: [String], skipping seen: Set<String>, open: [Office.OpenDocument]) {
         let wanted = Set(files.filter { !seen.contains($0) }.map {
             URL(fileURLWithPath: expandPath($0)).resolvingSymlinksInPath().path
         })
-        let open = Office.openDocuments()
         Log.write("  [office] open in Office: \(open.map(\.name)); already handled: \(seen.map { ($0 as NSString).lastPathComponent })")
         let leftovers = open.filter {
             wanted.contains(URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path)
@@ -851,11 +937,29 @@ enum WindowCloser {
 
 @MainActor
 enum Verify {
+    /// What Office, Preview and Brave report, gathered in the background before checking.
+    struct Snapshot {
+        var elsewhere: [String] = []
+        var braveNames: Set<String> = []
+    }
+
+    static func snapshot(_ done: @escaping @MainActor (Snapshot) -> Void) {
+        var snap = Snapshot()
+        var waiting = 3
+        func finished() {
+            waiting -= 1
+            if waiting == 0 { done(snap) }
+        }
+        Office.openDocumentsInBackground { snap.elsewhere += $0.map(\.path); finished() }
+        Scripting.previewDocumentPathsInBackground { snap.elsewhere += $0; finished() }
+        Brave.windowNamesInBackground { snap.braveNames = $0; finished() }
+    }
+
     /// Things that should have opened but aren't there.
-    static func afterOpen(_ p: Project) -> [Issue] {
+    static func afterOpen(_ p: Project, _ snap: Snapshot) -> [Issue] {
         var issues: [Issue] = []
         let docs = p.files.filter { wholeAppBundleID($0) == nil && FileManager.default.fileExists(atPath: expandPath($0)) }
-        let open = openDocuments(docs)
+        let open = openDocuments(docs, snap)
         for f in docs where !open.contains(f) {
             issues.append(Issue(text: "\(name(f)) didn't open"))
         }
@@ -863,7 +967,7 @@ enum Verify {
             issues.append(Issue(text: "\(appName(appID)) isn't running"))
         }
         for brave in p.braveWindowNames.map({ $0.trimmingCharacters(in: .whitespaces) })
-        where !brave.isEmpty && Brave.bounds(windowName: brave) == nil {
+        where !brave.isEmpty && !snap.braveNames.contains(brave) {
             issues.append(Issue(text: "Brave window \"\(brave)\" not found"))
         }
         if !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty,
@@ -874,11 +978,11 @@ enum Verify {
     }
 
     /// Things that should have closed but are still there. Windows asking to save don't count.
-    static func afterClose(_ p: Project, keepRunning: Set<String>) -> [Issue] {
+    static func afterClose(_ p: Project, keepRunning: Set<String>, _ snap: Snapshot) -> [Issue] {
         var issues: [Issue] = []
         let docs = p.files.filter { wholeAppBundleID($0) == nil }
         let waiting = Set(AX.documentWindows(files: docs, everywhere: true).filter { AX.hasSheet($0.window) }.map(\.path))
-        for f in openDocuments(docs) where !waiting.contains(f) {
+        for f in openDocuments(docs, snap) where !waiting.contains(f) {
             let app = appBundleID(f)
             issues.append(Issue(text: "\(name(f)) is still open",
                                 stuckApp: app.map(officeAppIDs.contains) == true ? app : nil))
@@ -902,12 +1006,12 @@ enum Verify {
     }
 
     /// Which of these files are open anywhere: in a window, a Preview tab, or Office.
-    private static func openDocuments(_ files: [String]) -> Set<String> {
+    private static func openDocuments(_ files: [String], _ snap: Snapshot) -> Set<String> {
         func resolved(_ path: String) -> String {
             URL(fileURLWithPath: expandPath(path)).resolvingSymlinksInPath().path
         }
         var open = Set(AX.documentWindows(files: files, everywhere: true).map(\.path))
-        let elsewhere = Set((Office.openDocumentPaths() + Scripting.previewDocumentPaths()).map(resolved))
+        let elsewhere = Set(snap.elsewhere.map(resolved))
         for f in files where elsewhere.contains(resolved(f)) { open.insert(f) }
         return open
     }
@@ -962,7 +1066,7 @@ enum Scripting {
     static func closeDocuments(appID: String, paths: [String]) {
         guard !paths.isEmpty else { return }
         let condition = paths.map { "path is \"\(escape($0))\"" }.joined(separator: " or ")
-        AppleScriptRunner.result("""
+        BackgroundScript.run("""
         ignoring application responses
             tell application id "\(appID)"
                 try
@@ -970,7 +1074,28 @@ enum Scripting {
                 end try
             end tell
         end ignoring
-        """)
+        """, lane: appID == "com.apple.Preview" ? "preview" : "other", label: "close documents in \(appID)")
+    }
+
+    /// Every document open in Preview, in the background (for the check after opening or closing).
+    static func previewDocumentPathsInBackground(_ done: @escaping @MainActor ([String]) -> Void) {
+        let id = "com.apple.Preview"
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty else { return done([]) }
+        BackgroundScript.run("""
+        set out to ""
+        with timeout of 6 seconds
+            tell application id "\(id)"
+                repeat with d in documents
+                    try
+                        set out to out & (path of d) & linefeed
+                    end try
+                end repeat
+            end tell
+        end timeout
+        return out
+        """, lane: "preview", label: "Preview documents") { output, _ in
+            done(BackgroundScript.lines(output))
+        }
     }
 
     private static func escape(_ s: String) -> String {

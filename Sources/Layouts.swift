@@ -446,6 +446,57 @@ enum Office {
         return out
     }
 
+    /// The same as openDocuments, asked in the background so a slow Office app can't freeze
+    /// anything (an app that doesn't answer within 6 seconds is treated as having none open).
+    static func openDocumentsInBackground(_ done: @escaping @MainActor ([OpenDocument]) -> Void) {
+        let running = apps.filter { !NSRunningApplication.runningApplications(withBundleIdentifier: $0.id).isEmpty }
+        guard !running.isEmpty else { return done([]) }
+        let parts = running.map { app in """
+            set theFull to {}
+            set theNames to {}
+            try
+                with timeout of 6 seconds
+                    tell application id "\(app.id)"
+                        set theFull to full name of \(app.collection)
+                        set theNames to name of \(app.collection)
+                    end tell
+                end timeout
+            end try
+            -- An app with nothing open answers "missing value"; one document can come back on its own.
+            if theFull is missing value then set theFull to {}
+            if theNames is missing value then set theNames to {}
+            if class of theFull is not list then set theFull to {theFull}
+            if class of theNames is not list then set theNames to {theNames}
+            repeat with i from 1 to (count of theFull)
+                set t to (item i of theFull) as text
+                set p to ""
+                if t starts with "/" or t contains "://" then
+                    set p to t
+                else if t contains ":" then
+                    try
+                        set p to POSIX path of t
+                    end try
+                end if
+                if p is not "" and i ≤ (count of theNames) then set out to out & "\(app.id)" & tab & p & tab & ((item i of theNames) as text) & linefeed
+            end repeat
+            """
+        }
+        let script = "set out to \"\"\n" + parts.joined(separator: "\n") + "\nreturn out"
+        BackgroundScript.run(script, lane: "office", timeout: 20, label: "Office documents") { output, _ in
+            done(BackgroundScript.lines(output).compactMap { line in
+                let f = line.components(separatedBy: "\t")
+                guard f.count >= 3, let app = apps.first(where: { $0.id == f[0] }) else { return nil }
+                var path = f[1]
+                if path.contains("://") {
+                    guard let local = OneDrive.localPath(for: path) else { return nil }
+                    path = local
+                }
+                return OpenDocument(appID: app.id, collection: app.collection, path: path,
+                                    name: f[2...].joined(separator: "\t"))
+            })
+        }
+    }
+
     /// Asks Office to close these documents ("saving ask", so unsaved work still prompts).
     /// Doesn't wait for a reply, so a save prompt can't freeze Project Launcher.
     static func close(_ docs: [OpenDocument]) {
@@ -453,7 +504,7 @@ enum Office {
             guard let element = apps.first(where: { $0.id == doc.appID })?.element else { continue }
             let name = doc.name.replacingOccurrences(of: "\\", with: "\\\\")
                                .replacingOccurrences(of: "\"", with: "\\\"")
-            AppleScriptRunner.result("""
+            BackgroundScript.run("""
             ignoring application responses
                 tell application id "\(doc.appID)"
                     try
@@ -461,7 +512,7 @@ enum Office {
                     end try
                 end tell
             end ignoring
-            """)
+            """, lane: "office", label: "close \(doc.name)")
         }
     }
 }

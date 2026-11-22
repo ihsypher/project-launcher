@@ -297,9 +297,14 @@ final class ProjectStore: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self, let p = self.projects.first(where: { $0.id == id }),
                       self.isOpen(p) == opened else { return } // toggled again since
-                let issues = opened ? Verify.afterOpen(p) : Verify.afterClose(p, keepRunning: self.appsInUse(except: id))
-                Log.write("CHECK \(opened ? "open" : "close") \(p.name): " + (issues.isEmpty ? "all OK" : issues.map(\.text).joined(separator: "; ")))
-                self.problems[id] = issues.isEmpty ? nil : Problem(opened: opened, issues: issues)
+                Verify.snapshot { [weak self] snap in
+                    guard let self, let p = self.projects.first(where: { $0.id == id }),
+                          self.isOpen(p) == opened else { return }
+                    let issues = opened ? Verify.afterOpen(p, snap)
+                        : Verify.afterClose(p, keepRunning: self.appsInUse(except: id), snap)
+                    Log.write("CHECK \(opened ? "open" : "close") \(p.name): " + (issues.isEmpty ? "all OK" : issues.map(\.text).joined(separator: "; ")))
+                    self.problems[id] = issues.isEmpty ? nil : Problem(opened: opened, issues: issues)
+                }
             }
         }
     }
