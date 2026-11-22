@@ -140,14 +140,15 @@ enum Layouts {
         return placed
     }
 
-    /// Windows take a moment to appear after opening, so each is placed as soon as it's
-    /// there (checking at 0.3s, 0.6s, 1s, 1.5s, 2.5s and 4s), then everything is checked
-    /// once more 1.5s later in case an app moved its own window while loading.
-    /// Stops if the project is closed again in the meantime.
+    /// Windows take a moment to appear after opening (Word can take 5s+ for a OneDrive file),
+    /// so each is placed as soon as it's there: checking every 0.3-0.5s for the first 4s, then
+    /// every second up to 9s. Then everything is checked once more 1.5s later in case an app
+    /// moved its own window while loading. Stops if the project is closed again in the meantime.
     static func applySoon(_ frames: [SavedFrame], while stillOpen: @escaping @MainActor () -> Bool) {
         Task { @MainActor in
             var waiting = Set(frames)
-            for delay in [0.3, 0.3, 0.4, 0.5, 1.0, 1.5] where !waiting.isEmpty {
+            let delays = [0.3, 0.3, 0.4, 0.5, 0.5, 0.5, 0.5, 0.5, 1, 1, 1, 1, 1]
+            for delay in delays where !waiting.isEmpty {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 guard stillOpen() else { return }
                 waiting.subtract(apply(Array(waiting)))
