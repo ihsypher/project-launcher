@@ -157,7 +157,9 @@ final class ProjectStore: ObservableObject {
         didSet { save() }
     }
     /// Which projects are currently "open" (ticked).
-    @Published private(set) var openIDs: Set<UUID> = []
+    @Published private(set) var openIDs: Set<UUID> = [] {
+        didSet { saveOpenState() }
+    }
     /// Which project the editor window shows.
     @Published var editorSelection: UUID?
     /// What the check a few seconds after opening or closing found wrong, by project.
@@ -180,6 +182,7 @@ final class ProjectStore: ObservableObject {
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         fileURL = support.appendingPathComponent("projects.json")
         load()
+        restoreOpenState()
         finishStaleSessions()
         Backups.makeIfDue()
         RaycastScripts.sync(projects: projects, groups: groups)
@@ -364,7 +367,9 @@ final class ProjectStore: ObservableObject {
     static let idleMinutesKey = "idlePauseMinutes"
 
     /// Open projects whose time is paused because you're away.
-    @Published private(set) var pausedIDs: Set<UUID> = []
+    @Published private(set) var pausedIDs: Set<UUID> = [] {
+        didSet { saveOpenState() }
+    }
     private var resumeTimer: Timer?
 
     func isPaused(_ p: Project) -> Bool { pausedIDs.contains(p.id) }
@@ -382,6 +387,10 @@ final class ProjectStore: ObservableObject {
             pausedIDs.insert(p.id)
             Log.write("PAUSE \(p.name): no keyboard or mouse for \(Int(idle / 60)) min")
         }
+        watchForReturn()
+    }
+
+    private func watchForReturn() {
         guard !pausedIDs.isEmpty, resumeTimer == nil else { return }
         resumeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.resumeIfBack() }
@@ -432,11 +441,50 @@ final class ProjectStore: ObservableObject {
         }
     }
 
+    // MARK: Open projects across restarts
+
+    private static let openStateKey = "openProjects"
+
+    /// Which projects are open (and paused), so they stay ticked and keep counting
+    /// when Project Launcher restarts (e.g. after an update). Not after the Mac restarts.
+    private func saveOpenState() {
+        let state: [String: Any] = [
+            "open": openIDs.map(\.uuidString),
+            "paused": pausedIDs.map(\.uuidString),
+            "boot": Self.bootTime,
+        ]
+        UserDefaults.standard.set(state, forKey: Self.openStateKey)
+    }
+
+    private func restoreOpenState() {
+        guard let state = UserDefaults.standard.dictionary(forKey: Self.openStateKey),
+              let boot = state["boot"] as? Double, abs(boot - Self.bootTime) < 2 else { return }
+        let known = Set(projects.map(\.id))
+        func ids(_ key: String) -> Set<UUID> {
+            Set(((state[key] as? [String]) ?? []).compactMap(UUID.init(uuidString:))).intersection(known)
+        }
+        openIDs = ids("open")
+        pausedIDs = ids("paused").intersection(openIDs)
+        if !openIDs.isEmpty {
+            Log.write("RESTORE open projects: \(projects.filter { openIDs.contains($0.id) }.map(\.name))")
+        }
+        if !pausedIDs.isEmpty { watchForReturn() }
+    }
+
+    /// When the Mac last started up, in seconds since 1970.
+    private static var bootTime: Double {
+        var tv = timeval()
+        var size = MemoryLayout<timeval>.size
+        sysctlbyname("kern.boottime", &tv, &size, nil, 0)
+        return Double(tv.tv_sec)
+    }
+
     /// Sessions left over from a previous run (e.g. the app was quit by an update or a restart).
+    /// Open projects keep theirs: the next heartbeat carries on or, after a long gap, splits it.
     private func finishStaleSessions() {
         var copy = projects
         var changed = false
-        for i in copy.indices {
+        for i in copy.indices where !openIDs.contains(copy[i].id) || pausedIDs.contains(copy[i].id) {
             guard let a = copy[i].activeSession else { continue }
             if a.lastBeat.timeIntervalSince(a.start) >= 30 {
                 copy[i].timeLog.append(WorkSession(start: a.start, end: a.lastBeat))
