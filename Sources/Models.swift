@@ -182,7 +182,6 @@ final class ProjectStore: ObservableObject {
         load()
         finishStaleSessions()
         Backups.makeIfDue()
-        ClaudeApp.watchForManualOpen()
         RaycastScripts.sync(projects: projects, groups: groups)
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.flushSave() }
@@ -298,7 +297,7 @@ final class ProjectStore: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self, let p = self.projects.first(where: { $0.id == id }),
                       self.isOpen(p) == opened else { return } // toggled again since
-                Verify.snapshot { [weak self] snap in
+                Verify.snapshot(for: p) { [weak self] snap in
                     guard let self, let p = self.projects.first(where: { $0.id == id }),
                           self.isOpen(p) == opened else { return }
                     let issues = opened ? Verify.afterOpen(p, snap)

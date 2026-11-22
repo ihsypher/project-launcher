@@ -455,8 +455,14 @@ enum Office {
 
     /// The same as openDocuments, asked in the background so a slow Office app can't freeze
     /// anything (an app that doesn't answer within 6 seconds is treated as having none open).
-    static func openDocumentsInBackground(_ done: @escaping @MainActor ([OpenDocument]) -> Void) {
-        let running = apps.filter { !NSRunningApplication.runningApplications(withBundleIdentifier: $0.id).isEmpty }
+    /// With `files`, only the Office apps those files open in are asked, so a sleepy Excel
+    /// doesn't hold up closing a Word document.
+    static func openDocumentsInBackground(for files: [String]? = nil, _ done: @escaping @MainActor ([OpenDocument]) -> Void) {
+        let wanted = files.map { Set($0.compactMap(appBundleID)) }
+        let running = apps.filter {
+            wanted?.contains($0.id) != false
+                && !NSRunningApplication.runningApplications(withBundleIdentifier: $0.id).isEmpty
+        }
         guard !running.isEmpty else { return done([]) }
         let parts = running.map { app in """
             set theFull to {}

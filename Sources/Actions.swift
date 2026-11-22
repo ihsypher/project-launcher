@@ -209,7 +209,7 @@ enum ClaudeApp {
     static func close(mode: String) {
         guard mode != "leave", bundleID() != nil else { return }
         let fresh = UserDefaults.standard.object(forKey: freshOnCloseKey) as? Bool ?? true
-        // The new chat waits until you open Claude yourself (see watchForManualOpen), so closing
+        // The new chat waits until you open Claude yourself (see watchClaudeWindows), so closing
         // is instant and reopening the project finds Claude still on its chat.
         freshPending = fresh && mode != "quit"
         putAway(mode: mode)
@@ -222,13 +222,13 @@ enum ClaudeApp {
     private static var putAwayAt = Date.distantPast
 
     /// Whether Claude was opened again (by hand or by a project) after this moment.
-    private static func broughtBack(since date: Date) -> Bool {
+    static func broughtBack(since date: Date) -> Bool {
         max(lastOpened, lastOpenedByHand) > date
     }
 
-    /// Minimising Claude's only window can leave Claude the active app, and then clicking it
-    /// in the Dock just un-minimises the window without "activating" anything. So Claude's
-    /// windows are watched too, while a reset is waiting.
+    /// While a reset is waiting, Claude's windows are watched for one coming back on screen
+    /// (from the Dock, Spotlight, Raycast...). Claude merely becoming the active app doesn't
+    /// count: clicking the menu-bar icon can do that while its window stays minimised.
     private static var windowWatcher: AXObserver?
 
     private static func watchClaudeWindows() {
@@ -262,24 +262,9 @@ enum ClaudeApp {
         stopWatchingClaudeWindows()
         Log.write("Claude opened by hand: new chat, fill screen")
         NSWorkspace.shared.open(home)
-        restoreMinimised()
         // Once the window is back from the Dock.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             MainActor.assumeIsolated { fillScreen() }
-        }
-    }
-
-    /// When you open Claude yourself after a project closed it (Dock, Spotlight, Raycast...),
-    /// switches it to a new chat filling the screen.
-    static func watchForManualOpen() {
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { note in
-            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            MainActor.assumeIsolated {
-                guard let id = bundleID(), app?.bundleIdentifier == id else { return }
-                openedByHand()
-            }
         }
     }
 
@@ -905,7 +890,7 @@ enum WindowCloser {
         let seen = Seen()
         // Office is asked which documents it has open first (in the background, as it can be
         // slow to answer), so its documents are closed by Office and never pressed.
-        Office.openDocumentsInBackground { office in
+        Office.openDocumentsInBackground(for: files) { office in
             closeOfficeDocuments(files, seen, open: office)
             closeWithScripting(files, seen)
             pressAll(files, seen, pass: "0s", everywhere: true)
@@ -915,7 +900,7 @@ enum WindowCloser {
                     MainActor.assumeIsolated {
                         pressAll(files, seen, pass: "\(delay)s", everywhere: last)
                         if last {
-                            Office.openDocumentsInBackground { closeOfficeLeftovers(files, skipping: seen.paths, open: $0) }
+                            Office.openDocumentsInBackground(for: files) { closeOfficeLeftovers(files, skipping: seen.paths, open: $0) }
                         }
                     }
                 }
@@ -1041,14 +1026,14 @@ enum Verify {
         var braveNames: Set<String> = []
     }
 
-    static func snapshot(_ done: @escaping @MainActor (Snapshot) -> Void) {
+    static func snapshot(for p: Project, _ done: @escaping @MainActor (Snapshot) -> Void) {
         var snap = Snapshot()
         var waiting = 3
         func finished() {
             waiting -= 1
             if waiting == 0 { done(snap) }
         }
-        Office.openDocumentsInBackground { snap.elsewhere += $0.map(\.path); finished() }
+        Office.openDocumentsInBackground(for: p.files) { snap.elsewhere += $0.map(\.path); finished() }
         Scripting.previewDocumentPathsInBackground { snap.elsewhere += $0; finished() }
         Brave.windowNamesInBackground { snap.braveNames = $0; finished() }
     }
@@ -1094,7 +1079,9 @@ enum Verify {
         }
         if !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty,
            let id = ClaudeApp.bundleID(), !keepRunning.contains(id) {
-            if (p.claudeOnClose == "hide" || p.claudeOnClose == "minimise") && ClaudeApp.isShowing(mode: p.claudeOnClose) {
+            // (Not if you've opened Claude again yourself since closing.)
+            if (p.claudeOnClose == "hide" || p.claudeOnClose == "minimise") && ClaudeApp.isShowing(mode: p.claudeOnClose)
+                && !ClaudeApp.broughtBack(since: Date().addingTimeInterval(-6)) {
                 issues.append(Issue(text: "Claude is still showing"))
             } else if p.claudeOnClose == "quit" && isRunning(id) {
                 issues.append(Issue(text: "Claude is still running"))
