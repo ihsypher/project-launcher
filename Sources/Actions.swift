@@ -22,6 +22,11 @@ enum Launcher {
                         "These may have been moved or renamed:\n\n" + missing.joined(separator: "\n"))
         }
         // Backup pages go with the first window, if it isn't open.
+        // Saved positions for these screens (only for files still in the project).
+        let frames = p.layouts[ScreenSetup.currentKey()]?.filter { $0.kind != "file" || p.files.contains($0.key) } ?? []
+        // App and Claude windows already there (usually minimised) go to their place before
+        // they come back, so they appear straight in position instead of jumping.
+        Layouts.apply(frames.filter { $0.kind == "app" || $0.kind == "claude" })
         // Claude opens straight away, then comes to the front again once Brave (which runs
         // in the background) has finished, so the chat ends up in front.
         let hasClaude = !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty
@@ -29,7 +34,8 @@ enum Launcher {
         let windows = p.braveWindowNames.isEmpty ? [""] : p.braveWindowNames
         for (i, name) in windows.enumerated() {
             let last = i == windows.count - 1
-            Brave.show(windowName: name, urls: i == 0 ? p.urls : []) {
+            let bounds = frames.first { $0.kind == "brave" && $0.key == name }?.rect
+            Brave.show(windowName: name, urls: i == 0 ? p.urls : [], bounds: bounds) {
                 if last && hasClaude && !p.braveWindowNames.isEmpty && stillOpen() { ClaudeApp.bringToFront() }
             }
         }
@@ -40,12 +46,8 @@ enum Launcher {
                 AppWindows.projectWindows(id, path: path, in: p).forEach { AX.setMinimized($0, false) }
             }
         }
-        // Put windows back where they were saved for this screen setup.
-        // (Only for files still in the project: a removed file's saved position is ignored.)
-        if let frames = p.layouts[ScreenSetup.currentKey()]?.filter({ $0.kind != "file" || p.files.contains($0.key) }),
-           !frames.isEmpty {
-            Layouts.applySoon(frames, while: stillOpen)
-        }
+        // Then keep putting windows in place as they appear (documents, new windows).
+        if !frames.isEmpty { Layouts.applySoon(frames, while: stillOpen) }
     }
 
     /// `keepRunning`: bundle IDs of apps another open project still uses.
@@ -364,7 +366,8 @@ enum Brave {
     /// If a window with this name exists: un-minimise it and bring it to the front.
     /// Otherwise: open the URLs in a new window and try to give it the name.
     /// `then` runs once Brave has done it (or straight away if there's nothing to show).
-    static func show(windowName: String, urls: [String], then: (@MainActor () -> Void)? = nil) {
+    /// `bounds`: where to put the window, set before it's un-minimised so it comes back in place.
+    static func show(windowName: String, urls: [String], bounds: CGRect? = nil, then: (@MainActor () -> Void)? = nil) {
         let name = windowName.trimmingCharacters(in: .whitespaces)
         let cleanURLs = urls
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -372,10 +375,14 @@ enum Brave {
         if name.isEmpty && cleanURLs.isEmpty { then?(); return }
 
         let urlList = "{" + cleanURLs.map { "\"\(escape($0))\"" }.joined(separator: ", ") + "}"
+        let place = bounds.map { r in
+            "{\(Int(r.minX.rounded())), \(Int(r.minY.rounded())), \(Int(r.maxX.rounded())), \(Int(r.maxY.rounded()))}"
+        } ?? "missing value"
 
         let script = """
         set wantedName to "\(escape(name))"
         set theURLs to \(urlList)
+        set thePlace to \(place)
         if application "\(appName)" is not running then
             tell application "\(appName)" to launch
             -- give Brave time to restore its windows (named windows come back with the session)
@@ -400,10 +407,20 @@ enum Brave {
                 end repeat
             end if
             if found is not missing value then
+                if thePlace is not missing value then
+                    try
+                        set bounds of found to thePlace
+                    end try
+                end if
                 set minimized of found to false
                 set index of found to 1
             else if (count of theURLs) > 0 then
                 set newWin to make new window
+                if thePlace is not missing value then
+                    try
+                        set bounds of newWin to thePlace
+                    end try
+                end if
                 set URL of active tab of newWin to item 1 of theURLs
                 repeat with i from 2 to (count of theURLs)
                     make new tab at end of tabs of newWin with properties {URL:(item i of theURLs)}
@@ -733,17 +750,25 @@ enum AX {
         if !wasMinimised, let now = frame(of: window),
            abs(now.minX - rect.minX) < 2, abs(now.minY - rect.minY) < 2,
            abs(now.width - rect.width) < 2, abs(now.height - rect.height) < 2 { return false }
-        if wasMinimised { AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
         var pos = rect.origin
         var size = rect.size
         guard let posValue = AXValueCreate(.cgPoint, &pos),
               let sizeValue = AXValueCreate(.cgSize, &size) else { return false }
-        // Size, move, then size again: some apps clamp the size until the window is on the right screen.
-        AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
-        AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, posValue)
-        AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
-        // Bring back a window that was minimised (e.g. one of several Terminal windows).
-        if wasMinimised { AXUIElementPerformAction(window, kAXRaiseAction as CFString) }
+        func place() {
+            // Size, move, then size again: some apps clamp the size until the window is on the right screen.
+            AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, posValue)
+            AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+        }
+        // A minimised window is placed first, so it comes back from the Dock straight into position
+        // (e.g. one of several Terminal windows); placed again after in case the app ignored it.
+        place()
+        if wasMinimised {
+            AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            if let now = frame(of: window), abs(now.minX - rect.minX) >= 2 || abs(now.minY - rect.minY) >= 2
+                || abs(now.width - rect.width) >= 2 || abs(now.height - rect.height) >= 2 { place() }
+        }
         return true
     }
 

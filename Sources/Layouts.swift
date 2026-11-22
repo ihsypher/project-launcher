@@ -129,7 +129,7 @@ enum Layouts {
             case "brave":
                 if Brave.setBounds(windowName: f.key, f.rect) { placed.insert(f) }
             case "claude":
-                if let w = ClaudeApp.mainWindow() {
+                if let id = ClaudeApp.bundleID(), let w = AppWindows.all(id).first {
                     AX.setFrame(w, f.rect)
                     placed.insert(f)
                 }
