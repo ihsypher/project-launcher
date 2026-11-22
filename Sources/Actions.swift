@@ -139,6 +139,7 @@ enum ClaudeApp {
             return
         }
         freshPending = false
+        stopWatchingClaudeWindows()
         lastOpened = Date()
         NSWorkspace.shared.open(url)
         restoreMinimised()
@@ -215,6 +216,56 @@ enum ClaudeApp {
     /// Set when a project put Claude away; cleared once Claude has been reset or a project opens it.
     private static var freshPending = false
     private static var lastOpened = Date.distantPast
+    private static var lastOpenedByHand = Date.distantPast
+    private static var putAwayAt = Date.distantPast
+
+    /// Whether Claude was opened again (by hand or by a project) after this moment.
+    private static func broughtBack(since date: Date) -> Bool {
+        max(lastOpened, lastOpenedByHand) > date
+    }
+
+    /// Minimising Claude's only window can leave Claude the active app, and then clicking it
+    /// in the Dock just un-minimises the window without "activating" anything. So Claude's
+    /// windows are watched too, while a reset is waiting.
+    private static var windowWatcher: AXObserver?
+
+    private static func watchClaudeWindows() {
+        stopWatchingClaudeWindows()  // Claude may have been restarted since
+        guard let id = bundleID(),
+              let pid = NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.processIdentifier else { return }
+        var observer: AXObserver?
+        guard AXObserverCreate(pid, { _, _, _, _ in
+            MainActor.assumeIsolated { ClaudeApp.openedByHand() }
+        }, &observer) == .success, let observer else { return }
+        let app = AXUIElementCreateApplication(pid)
+        for name in [kAXWindowDeminiaturizedNotification, kAXApplicationShownNotification] {
+            AXObserverAddNotification(observer, app, name as CFString, nil)
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        windowWatcher = observer
+    }
+
+    private static func stopWatchingClaudeWindows() {
+        guard let observer = windowWatcher else { return }
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        windowWatcher = nil
+    }
+
+    /// Claude came back on screen without a project opening it: start a new chat, filling the screen.
+    private static func openedByHand() {
+        guard freshPending, Date().timeIntervalSince(lastOpened) > 3,
+              let home = URL(string: "claude://claude.ai/new") else { return }
+        freshPending = false
+        lastOpenedByHand = Date()
+        stopWatchingClaudeWindows()
+        Log.write("Claude opened by hand: new chat, fill screen")
+        NSWorkspace.shared.open(home)
+        restoreMinimised()
+        // Once the window is back from the Dock.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            MainActor.assumeIsolated { fillScreen() }
+        }
+    }
 
     /// When you open Claude yourself after a project closed it (Dock, Spotlight, Raycast...),
     /// switches it to a new chat filling the screen.
@@ -224,17 +275,8 @@ enum ClaudeApp {
         ) { note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             MainActor.assumeIsolated {
-                guard freshPending, let id = bundleID(), app?.bundleIdentifier == id,
-                      Date().timeIntervalSince(lastOpened) > 3,
-                      let home = URL(string: "claude://claude.ai/new") else { return }
-                freshPending = false
-                Log.write("Claude opened by hand: new chat, fill screen")
-                NSWorkspace.shared.open(home)
-                restoreMinimised()
-                // Once the window is back from the Dock.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    MainActor.assumeIsolated { fillScreen() }
-                }
+                guard let id = bundleID(), app?.bundleIdentifier == id else { return }
+                openedByHand()
             }
         }
     }
@@ -253,6 +295,9 @@ enum ClaudeApp {
     private static func putAway(mode: String) {
         guard let bundleID = bundleID() else { return }
         Log.write("  \(mode) Claude")
+        let putAwayAt = Date()
+        self.putAwayAt = putAwayAt
+        if freshPending { watchClaudeWindows() }
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
         if mode == "minimise" {
             minimiseWindows(bundleID)
@@ -260,7 +305,7 @@ enum ClaudeApp {
             for delay in [0.6, 2.0] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                     MainActor.assumeIsolated {
-                        if isShowing(mode: "minimise") {
+                        if !broughtBack(since: putAwayAt), isShowing(mode: "minimise") {
                             Log.write("  Claude still showing after \(delay)s, minimising again")
                             minimiseWindows(bundleID)
                         }
@@ -278,7 +323,7 @@ enum ClaudeApp {
         for delay in [0.6, 2.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 MainActor.assumeIsolated {
-                    for app in apps where !app.isTerminated && !app.isHidden {
+                    for app in apps where !app.isTerminated && !app.isHidden && !broughtBack(since: putAwayAt) {
                         Log.write("  Claude still showing after \(delay)s, hiding again")
                         if !app.hide() {
                             AXUIElementSetAttributeValue(AXUIElementCreateApplication(app.processIdentifier),
