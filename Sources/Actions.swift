@@ -231,7 +231,11 @@ enum ClaudeApp {
     }
 
     /// Set when a project put Claude away; cleared once Claude has been reset or a project opens it.
-    private static var freshPending = false
+    /// Kept in settings so it survives Project Launcher restarting (e.g. after an update).
+    private static var freshPending: Bool {
+        get { UserDefaults.standard.bool(forKey: "claudeFreshPending") }
+        set { UserDefaults.standard.set(newValue, forKey: "claudeFreshPending") }
+    }
     private static var lastOpened = Date.distantPast
     private static var lastOpenedByHand = Date.distantPast
     private static var putAwayAt = Date.distantPast
@@ -245,6 +249,25 @@ enum ClaudeApp {
     /// (from the Dock, Spotlight, Raycast...). Claude merely becoming the active app doesn't
     /// count: clicking the menu-bar icon can do that while its window stays minimised.
     private static var windowWatcher: AXObserver?
+    private static var launchWatcher: NSObjectProtocol?
+
+    /// At launch: carries on waiting for Claude to be opened by hand. Also covers Claude
+    /// quitting and being started again, which comes back on the old chat and isn't seen
+    /// by the window watcher (that belongs to the old process).
+    static func resumeWaitingForReset() {
+        if freshPending { watchClaudeWindows() }
+        launchWatcher = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            MainActor.assumeIsolated {
+                guard freshPending, let id = bundleID(), app?.bundleIdentifier == id else { return }
+                // Give Claude time to open its window.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    MainActor.assumeIsolated { openedByHand() }
+                }
+            }
+        }
+    }
 
     private static func watchClaudeWindows() {
         stopWatchingClaudeWindows()  // Claude may have been restarted since

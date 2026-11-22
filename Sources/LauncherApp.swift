@@ -7,7 +7,10 @@ struct LauncherApp: App {
     @StateObject private var store = ProjectStore()
 
     init() {
-        MainActor.assumeIsolated { ClaudeApp.prepareAccessibility() }
+        MainActor.assumeIsolated {
+            ClaudeApp.prepareAccessibility()
+            ClaudeApp.resumeWaitingForReset()
+        }
     }
 
     var body: some Scene {
