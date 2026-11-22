@@ -300,21 +300,23 @@ enum Capture {
             where app.activationPolicy == .regular && !app.isHidden {
                 guard let id = app.bundleIdentifier, !skip.contains(id) else { continue }
                 for w in AX.windows(pid: app.processIdentifier) where !AX.isMinimized(w) {
-                    if let doc = AX.string(w, kAXDocumentAttribute) {
-                        if let url = URL(string: doc), url.isFileURL {
-                            add(url.path)
-                        } else if let local = OneDrive.localPath(for: doc) {
-                            add(local)
-                        }
-                    }
+                    if let path = AX.documentPath(w) { add(path) }
                 }
             }
         }
 
-        // Word, Excel and PowerPoint, asked directly in case they don't report documents above.
-        for path in Office.openDocumentPaths() { add(path) }
-        // Preview, asked directly so documents in background tabs are included too.
-        for path in Scripting.previewDocumentPaths() { add(path) }
+        // Word, Excel and PowerPoint, asked directly in case they don't report documents above,
+        // and Preview, so documents in background tabs are included too. These list every
+        // document, so leave out ones whose windows are all minimised or whose app is hidden.
+        let asked = Office.openDocumentPaths() + Scripting.previewDocumentPaths()
+        let windows = AX.documentWindows(files: asked, everywhere: true)
+        for path in asked {
+            let mine = windows.filter { $0.path == path }.map(\.window)
+            if !mine.isEmpty && mine.allSatisfy(AX.isMinimized) { continue }
+            if let id = appBundleID(path),
+               NSRunningApplication.runningApplications(withBundleIdentifier: id).contains(where: \.isHidden) { continue }
+            add(path)
+        }
 
         return paths
     }

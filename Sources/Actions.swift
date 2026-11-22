@@ -737,6 +737,15 @@ enum AX {
         return list
     }
 
+    /// The file a window shows. Most apps give a file:// link, some (Affinity) a plain path,
+    /// and Office a OneDrive web address for synced files.
+    static func documentPath(_ window: AXUIElement) -> String? {
+        guard let doc = string(window, kAXDocumentAttribute) else { return nil }
+        if doc.hasPrefix("/") { return doc }
+        if let url = URL(string: doc), url.isFileURL { return url.path }
+        return OneDrive.localPath(for: doc)
+    }
+
     static func string(_ element: AXUIElement, _ attr: String) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attr as CFString, &value) == .success else { return nil }
@@ -881,8 +890,8 @@ enum AX {
     /// Match by the window's document path (Preview, most Cocoa apps),
     /// falling back to the window title (Word, Excel).
     private static func matchingPath(_ window: AXUIElement, _ targets: [(String, URL)]) -> String? {
-        if let doc = string(window, kAXDocumentAttribute), let docURL = URL(string: doc) {
-            let docPath = docURL.resolvingSymlinksInPath().path
+        if let doc = documentPath(window) {
+            let docPath = URL(fileURLWithPath: doc).resolvingSymlinksInPath().path
             if let t = targets.first(where: { $0.1.path == docPath }) { return t.0 }
         }
         if let title = string(window, kAXTitleAttribute) {
