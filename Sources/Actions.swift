@@ -22,12 +22,15 @@ enum Launcher {
                         "These may have been moved or renamed:\n\n" + missing.joined(separator: "\n"))
         }
         // Backup pages go with the first window, if it isn't open.
-        // Claude opens once Brave has finished (it runs in the background), so the chat ends up in front.
+        // Claude opens straight away, then comes to the front again once Brave (which runs
+        // in the background) has finished, so the chat ends up in front.
+        let hasClaude = !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty
+        ClaudeApp.open(link: p.claudeLink)
         let windows = p.braveWindowNames.isEmpty ? [""] : p.braveWindowNames
         for (i, name) in windows.enumerated() {
             let last = i == windows.count - 1
             Brave.show(windowName: name, urls: i == 0 ? p.urls : []) {
-                if last && stillOpen() { ClaudeApp.open(link: p.claudeLink) }
+                if last && hasClaude && !p.braveWindowNames.isEmpty && stillOpen() { ClaudeApp.bringToFront() }
             }
         }
         // Minimised app windows without a saved position (those are restored with the layout).
@@ -135,8 +138,16 @@ enum ClaudeApp {
                         "Paste a link like https://claude.ai/chat/... or https://claude.ai/project/...\n\n\(link)")
             return
         }
+        freshPending = false
+        lastOpened = Date()
         NSWorkspace.shared.open(url)
         restoreMinimised()
+    }
+
+    /// Brings Claude to the front again (after Brave, which opens alongside, has taken it).
+    static func bringToFront() {
+        guard let id = bundleID() else { return }
+        NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.activate()
     }
 
     /// Bundle ID of whichever app handles claude:// links (the Claude desktop app).
@@ -195,18 +206,35 @@ enum ClaudeApp {
     static func close(mode: String) {
         guard mode != "leave", bundleID() != nil else { return }
         let fresh = UserDefaults.standard.object(forKey: freshOnCloseKey) as? Bool ?? true
-        guard fresh, mode != "quit", let home = URL(string: "claude://claude.ai/new") else {
-            putAway(mode: mode)
-            return
-        }
-        Log.write("  Claude: new chat, fill screen")
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = false
-        NSWorkspace.shared.open(home, configuration: config)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        // The new chat waits until you open Claude yourself (see watchForManualOpen), so closing
+        // is instant and reopening the project finds Claude still on its chat.
+        freshPending = fresh && mode != "quit"
+        putAway(mode: mode)
+    }
+
+    /// Set when a project put Claude away; cleared once Claude has been reset or a project opens it.
+    private static var freshPending = false
+    private static var lastOpened = Date.distantPast
+
+    /// When you open Claude yourself after a project closed it (Dock, Spotlight, Raycast...),
+    /// switches it to a new chat filling the screen.
+    static func watchForManualOpen() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             MainActor.assumeIsolated {
-                fillScreen()
-                putAway(mode: mode)
+                guard freshPending, let id = bundleID(), app?.bundleIdentifier == id,
+                      Date().timeIntervalSince(lastOpened) > 3,
+                      let home = URL(string: "claude://claude.ai/new") else { return }
+                freshPending = false
+                Log.write("Claude opened by hand: new chat, fill screen")
+                NSWorkspace.shared.open(home)
+                restoreMinimised()
+                // Once the window is back from the Dock.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    MainActor.assumeIsolated { fillScreen() }
+                }
             }
         }
     }

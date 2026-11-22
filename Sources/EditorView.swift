@@ -335,7 +335,7 @@ struct SettingsView: View {
                         Text("Never").tag(0)
                         ForEach([5, 10, 15, 30], id: \.self) { Text("\($0) minutes").tag($0) }
                     }
-                    Toggle("Leave Claude on a new chat, filling the screen, after closing a project", isOn: $claudeFresh)
+                    Toggle("Start Claude on a new chat, filling the screen, when you open it yourself after a project", isOn: $claudeFresh)
                     Toggle("Open Project Launcher at login", isOn: Binding(
                         get: { openAtLogin },
                         set: { LoginItem.set($0); openAtLogin = LoginItem.isEnabled }

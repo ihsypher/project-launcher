@@ -182,6 +182,7 @@ final class ProjectStore: ObservableObject {
         load()
         finishStaleSessions()
         Backups.makeIfDue()
+        ClaudeApp.watchForManualOpen()
         RaycastScripts.sync(projects: projects, groups: groups)
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.flushSave() }
