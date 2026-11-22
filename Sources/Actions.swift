@@ -33,16 +33,31 @@ enum Launcher {
         // App and Claude windows already there (usually minimised) go to their place before
         // they come back, so they appear straight in position instead of jumping.
         Layouts.apply(frames.filter { $0.kind == "app" || $0.kind == "claude" })
-        // Claude opens straight away, then comes to the front again once Brave (which runs
-        // in the background) has finished, so the chat ends up in front.
+        // The chat should end up in front of the browser. With Brave already running (it takes
+        // about 0.3s), Claude waits for it, so nothing swaps places. If Brave has to start up,
+        // or takes over 1.5s, Claude opens anyway and is raised again once Brave is done.
         let hasClaude = !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty
-        ClaudeApp.open(link: p.claudeLink)
+        let braveFirst = hasClaude && !p.braveWindowNames.isEmpty && Brave.isRunning
+        var claudeOpened = false
+        func openClaude() {
+            guard !claudeOpened, stillOpen() else { return }
+            claudeOpened = true
+            ClaudeApp.open(link: p.claudeLink)
+        }
+        if braveFirst {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                MainActor.assumeIsolated { openClaude() }
+            }
+        } else {
+            openClaude()
+        }
         let windows = p.braveWindowNames.isEmpty ? [""] : p.braveWindowNames
         for (i, name) in windows.enumerated() {
             let last = i == windows.count - 1
             let bounds = frames.first { $0.kind == "brave" && $0.key == name }?.rect
             Brave.show(windowName: name, urls: i == 0 ? p.urls : [], bounds: bounds) {
-                if last && hasClaude && !p.braveWindowNames.isEmpty && stillOpen() { ClaudeApp.bringToFront() }
+                guard last, hasClaude, !p.braveWindowNames.isEmpty, stillOpen() else { return }
+                if claudeOpened { ClaudeApp.bringToFront() } else { openClaude() }
             }
         }
         // Minimised app windows without a saved position (those are restored with the layout).
@@ -162,10 +177,21 @@ enum ClaudeApp {
         restoreMinimised()
     }
 
-    /// Brings Claude to the front again (after Brave, which opens alongside, has taken it).
+    /// Puts Claude's window back on top once Brave's has come back. Brave's window can land
+    /// above it while Claude is still the active app, so activating alone isn't enough:
+    /// the window is raised too, again once Brave's un-minimise animation has finished.
     static func bringToFront() {
         guard let id = bundleID() else { return }
-        NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.activate()
+        func raise() {
+            NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.activate()
+            if let w = mainWindow(), !AX.isMinimized(w) {
+                AXUIElementPerformAction(w, kAXRaiseAction as CFString)
+            }
+        }
+        raise()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            MainActor.assumeIsolated { raise() }
+        }
     }
 
     /// Bundle ID of whichever app handles claude:// links (the Claude desktop app).
@@ -386,7 +412,7 @@ enum ClaudeApp {
 enum Brave {
     static let appName = "Brave Browser"
 
-    /// If a window with this name exists: un-minimise it and bring it to the front.
+    /// If a window with this name exists: un-minimise it, without bringing Brave to the front.
     /// Otherwise: open the URLs in a new window and try to give it the name.
     /// `then` runs once Brave has done it (or straight away if there's nothing to show).
     /// `bounds`: where to put the window, set before it's un-minimised so it comes back in place.
@@ -454,7 +480,7 @@ enum Brave {
                     end try
                 end if
             end if
-            activate
+            -- No "activate": the browser comes back behind the project's other windows.
         end tell
         """
         BackgroundScript.run(script, lane: "brave", timeout: 20, label: "show Brave window \(name)") { _, error in
