@@ -736,7 +736,8 @@ struct ProjectDetail: View {
             }
         }
         .onAppear {
-            refreshBraveWindows()
+            // After the project shows: asking Brave takes a moment.
+            DispatchQueue.main.async { refreshBraveWindows() }
             // A new project: ready to type its name.
             if project.name == Project().name { DispatchQueue.main.async { nameFocused = true } }
         }

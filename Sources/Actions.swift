@@ -407,8 +407,10 @@ enum Brave {
         return CGRect(x: v[0], y: v[1], width: v[2] - v[0], height: v[3] - v[1])
     }
 
-    static func setBounds(windowName: String, _ r: CGRect) {
-        guard isRunning, !windowName.isEmpty else { return }
+    /// Returns whether the window was found.
+    @discardableResult
+    static func setBounds(windowName: String, _ r: CGRect) -> Bool {
+        guard isRunning, !windowName.isEmpty else { return false }
         let l = Int(r.minX.rounded()), t = Int(r.minY.rounded())
         let rt = Int(r.maxX.rounded()), b = Int(r.maxY.rounded())
         let script = """
@@ -417,13 +419,15 @@ enum Brave {
                 try
                     if (given name of w) is "\(escape(windowName))" then
                         set minimized of w to false
-                        set bounds of w to {\(l), \(t), \(rt), \(b)}
+                        if bounds of w is not {\(l), \(t), \(rt), \(b)} then set bounds of w to {\(l), \(t), \(rt), \(b)}
+                        return true
                     end if
                 end try
             end repeat
         end tell
+        return false
         """
-        AppleScriptRunner.result(script)
+        return AppleScriptRunner.result(script)?.booleanValue ?? false
     }
 
     /// The Brave window you're in (front-most, not minimised), for "New Project from What's Open".
@@ -568,21 +572,25 @@ enum AX {
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, on ? kCFBooleanTrue : kCFBooleanFalse)
     }
 
-    static func setFrame(_ window: AXUIElement, _ rect: CGRect) {
-        // Already there (layouts are applied several times while a project opens).
-        if !isMinimized(window), let now = frame(of: window),
+    /// Returns false if the window was already there.
+    @discardableResult
+    static func setFrame(_ window: AXUIElement, _ rect: CGRect) -> Bool {
+        let wasMinimised = isMinimized(window)
+        if !wasMinimised, let now = frame(of: window),
            abs(now.minX - rect.minX) < 2, abs(now.minY - rect.minY) < 2,
-           abs(now.width - rect.width) < 2, abs(now.height - rect.height) < 2 { return }
-        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+           abs(now.width - rect.width) < 2, abs(now.height - rect.height) < 2 { return false }
+        if wasMinimised { AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
         var pos = rect.origin
         var size = rect.size
         guard let posValue = AXValueCreate(.cgPoint, &pos),
-              let sizeValue = AXValueCreate(.cgSize, &size) else { return }
+              let sizeValue = AXValueCreate(.cgSize, &size) else { return false }
         // Size, move, then size again: some apps clamp the size until the window is on the right screen.
         AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
         AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, posValue)
         AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
-        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        // Bring back a window that was minimised (e.g. one of several Terminal windows).
+        if wasMinimised { AXUIElementPerformAction(window, kAXRaiseAction as CFString) }
+        return true
     }
 
     /// First visible window of an app.

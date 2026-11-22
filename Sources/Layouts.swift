@@ -101,16 +101,19 @@ enum Layouts {
         return frames
     }
 
-    /// Moves windows back to their saved positions.
-    static func apply(_ frames: [SavedFrame]) {
-        guard AX.ensureTrusted(prompt: false) else { return }
+    /// Moves windows back to their saved positions. Returns the frames whose window was
+    /// found (moved, or already in place), so they needn't be tried again.
+    @discardableResult
+    static func apply(_ frames: [SavedFrame]) -> Set<SavedFrame> {
+        guard AX.ensureTrusted(prompt: false) else { return [] }
+        var placed: Set<SavedFrame> = []
 
         let fileFrames = frames.filter { $0.kind == "file" }
         if !fileFrames.isEmpty {
             for item in AX.documentWindows(files: fileFrames.map { $0.key }) {
                 if let f = fileFrames.first(where: { $0.key == item.path }) {
-                    Log.write("  [layout] move \(AX.describe(item.window))")
-                    AX.setFrame(item.window, f.rect)
+                    if AX.setFrame(item.window, f.rect) { Log.write("  [layout] move \(AX.describe(item.window))") }
+                    placed.insert(f)
                 }
             }
         }
@@ -121,27 +124,37 @@ enum Layouts {
                 if let id = Bundle(url: URL(fileURLWithPath: expandPath(f.key)))?.bundleIdentifier,
                    let w = AppWindows.find(id, f, fallback: true) {
                     AX.setFrame(w, f.rect)
+                    placed.insert(f)
                 }
             case "brave":
-                Brave.setBounds(windowName: f.key, f.rect)
+                if Brave.setBounds(windowName: f.key, f.rect) { placed.insert(f) }
             case "claude":
-                if let w = ClaudeApp.mainWindow() { AX.setFrame(w, f.rect) }
+                if let w = ClaudeApp.mainWindow() {
+                    AX.setFrame(w, f.rect)
+                    placed.insert(f)
+                }
             default:
                 break
             }
         }
+        return placed
     }
 
-    /// Windows take a moment to appear after opening, so apply a few times as they do
-    /// (at 0.3s, 0.6s, 1s, 1.5s, 2.5s and 4s), unless the project has been closed again
-    /// in the meantime. Windows already in place don't move.
+    /// Windows take a moment to appear after opening, so each is placed as soon as it's
+    /// there (checking at 0.3s, 0.6s, 1s, 1.5s, 2.5s and 4s), then everything is checked
+    /// once more 1.5s later in case an app moved its own window while loading.
+    /// Stops if the project is closed again in the meantime.
     static func applySoon(_ frames: [SavedFrame], while stillOpen: @escaping @MainActor () -> Bool) {
         Task { @MainActor in
-            for delay in [0.3, 0.3, 0.4, 0.5, 1.0, 1.5] {
+            var waiting = Set(frames)
+            for delay in [0.3, 0.3, 0.4, 0.5, 1.0, 1.5] where !waiting.isEmpty {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 guard stillOpen() else { return }
-                apply(frames)
+                waiting.subtract(apply(Array(waiting)))
             }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard stillOpen() else { return }
+            apply(frames.filter { !waiting.contains($0) })
         }
     }
 }
