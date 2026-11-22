@@ -30,26 +30,34 @@ enum Launcher {
         // Backup pages go with the first window, if it isn't open.
         // Saved positions for these screens (only for files still in the project).
         let frames = p.layouts[ScreenSetup.currentKey()]?.filter { $0.kind != "file" || p.files.contains($0.key) } ?? []
-        // App and Claude windows already there (usually minimised) go to their place before
-        // they come back, so they appear straight in position instead of jumping.
-        Layouts.apply(frames.filter { $0.kind == "app" || $0.kind == "claude" })
         // The chat should end up in front of the browser. With Brave already running (it takes
         // about 0.3s), Claude waits for it, so nothing swaps places. If Brave has to start up,
         // or takes over 1.5s, Claude opens anyway and is raised again once Brave is done.
         let hasClaude = !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty
         let braveFirst = hasClaude && !p.braveWindowNames.isEmpty && Brave.isRunning
+        // Claude coming back from here on is the project's doing, not a reset to a new chat.
+        if hasClaude { ClaudeApp.projectIsOpening() }
+        // App and Claude windows already there (usually minimised) go to their place before
+        // they come back, so they appear straight in position instead of jumping.
+        Layouts.apply(frames.filter { $0.kind == "app" || (!braveFirst && $0.kind == "claude") })
         var claudeOpened = false
-        func openClaude() {
+        let started = Date()
+        func openClaude(_ why: String) {
             guard !claudeOpened, stillOpen() else { return }
             claudeOpened = true
+            Log.write(String(format: "  [%.2fs] open Claude (%@)", Date().timeIntervalSince(started), why))
+            // Claude becomes the active app before its window comes back, or Claude drops the
+            // window behind the others and raises it again when it takes the focus.
+            ClaudeApp.activate()
+            if braveFirst { Layouts.apply(frames.filter { $0.kind == "claude" }) }
             ClaudeApp.open(link: p.claudeLink)
         }
         if braveFirst {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                MainActor.assumeIsolated { openClaude() }
+                MainActor.assumeIsolated { openClaude("Brave took too long") }
             }
         } else {
-            openClaude()
+            openClaude(hasClaude && !p.braveWindowNames.isEmpty ? "Brave not running" : "no Brave window")
         }
         let windows = p.braveWindowNames.isEmpty ? [""] : p.braveWindowNames
         for (i, name) in windows.enumerated() {
@@ -57,7 +65,9 @@ enum Launcher {
             let bounds = frames.first { $0.kind == "brave" && $0.key == name }?.rect
             Brave.show(windowName: name, urls: i == 0 ? p.urls : [], bounds: bounds) {
                 guard last, hasClaude, !p.braveWindowNames.isEmpty, stillOpen() else { return }
-                if claudeOpened { ClaudeApp.bringToFront() } else { openClaude() }
+                Log.write(String(format: "  [%.2fs] Brave done", Date().timeIntervalSince(started)))
+                if claudeOpened { ClaudeApp.bringToFront(); return }
+                openClaude("after Brave")
             }
         }
         // Minimised app windows without a saved position (those are restored with the layout).
@@ -68,7 +78,9 @@ enum Launcher {
             }
         }
         // Then keep putting windows in place as they appear (documents, new windows).
-        if !frames.isEmpty { Layouts.applySoon(frames, while: stillOpen) }
+        // (Claude's waits for Brave: placing a minimised window brings it back.)
+        let later = braveFirst ? frames.filter { $0.kind != "claude" } : frames
+        if !later.isEmpty { Layouts.applySoon(later, while: stillOpen) }
     }
 
     /// A project app that's already running and whose project window is known and still there.
@@ -170,11 +182,21 @@ enum ClaudeApp {
                         "Paste a link like https://claude.ai/chat/... or https://claude.ai/project/...\n\n\(link)")
             return
         }
+        projectIsOpening()
+        NSWorkspace.shared.open(url)
+        restoreMinimised()
+    }
+
+    static func activate() {
+        guard let id = bundleID() else { return }
+        NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.activate()
+    }
+
+    /// A project is about to bring Claude back on its chat: stop waiting to reset it.
+    static func projectIsOpening() {
         freshPending = false
         stopWatchingClaudeWindows()
         lastOpened = Date()
-        NSWorkspace.shared.open(url)
-        restoreMinimised()
     }
 
     /// Puts Claude's window back on top once Brave's has come back. Brave's window can land
@@ -397,6 +419,24 @@ enum ClaudeApp {
 
     private static func minimiseWindows(_ bundleID: String) {
         AppWindows.all(bundleID).filter { !AX.isMinimized($0) }.forEach { AX.setMinimized($0, true) }
+        handOffFocus(from: bundleID)
+    }
+
+    /// With its windows minimised Claude would stay the active app, and it brings its window
+    /// back whenever it's made active again, e.g. when the menu-bar menu closes. So pass the
+    /// focus to the app of the front-most window still on screen.
+    private static func handOffFocus(from bundleID: String) {
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID,
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { return }
+        for info in list where info[kCGWindowLayer as String] as? Int == 0 {
+            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != getpid(),
+                  let app = NSRunningApplication(processIdentifier: pid),
+                  app.activationPolicy == .regular, app.bundleIdentifier != bundleID else { continue }
+            app.activate()
+            return
+        }
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first?.activate()
     }
 
     /// Brings back windows minimised when the project closed (opening a link doesn't always).
