@@ -320,6 +320,9 @@ struct SettingsView: View {
     @AppStorage(ProjectStore.closeOthersKey) private var closeOthers = true
     @AppStorage(RaycastScripts.enabledKey) private var raycast = true
     @AppStorage(ProjectStore.idleMinutesKey) private var idleMinutes = 10
+    @AppStorage(ProjectStore.saveLayoutOnCloseKey) private var saveLayoutOnClose = true
+    @AppStorage(ProjectStore.menuOrderKey) private var menuOrder = "manual"
+    @State private var updateStatus: String?
     @EnvironmentObject var store: ProjectStore
     @State private var openAtLogin = LoginItem.isEnabled
     @State private var backupStatus = Backups.lastBackupText()
@@ -331,6 +334,12 @@ struct SettingsView: View {
             Form {
                 Section {
                     Toggle("Close other projects when opening one", isOn: $closeOthers)
+                    Toggle("Remember window positions when closing a project", isOn: $saveLayoutOnClose)
+                    Picker("Menu order", selection: $menuOrder) {
+                        Text("As in Edit Projects").tag("manual")
+                        Text("Most recently used").tag("recent")
+                        Text("Due soonest").tag("due")
+                    }
                     Picker("Pause time when away for", selection: $idleMinutes) {
                         Text("Never").tag(0)
                         ForEach([5, 10, 15, 30], id: \.self) { Text("\($0) minutes").tag($0) }
@@ -409,6 +418,31 @@ struct SettingsView: View {
                     Text(Backups.isInICloud
                          ? "Your projects, groups and time are backed up daily to iCloud Drive > Project Launcher Backups (last \(Backups.keep) kept), so they're safe if you reinstall or get a new Mac."
                          : "Your projects, groups and time are backed up daily (last \(Backups.keep) kept). Turn on iCloud Drive to keep them off this Mac too.")
+                }
+
+                Section {
+                    HStack {
+                        Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")")
+                        Spacer()
+                        if store.updateAvailable {
+                            Button("Install Update…") { Updater.run() }
+                        } else {
+                            if let updateStatus {
+                                Text(updateStatus).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Button("Check for Updates") {
+                                updateStatus = "Checking…"
+                                Updater.checkForUpdates { available in
+                                    store.setUpdateAvailable(available)
+                                    updateStatus = available ? nil : "Up to date"
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    Label("Updates", systemImage: "arrow.down.circle")
+                } footer: {
+                    Text("Checks GitHub every 4 hours too. When there's a new version, Install Update… also appears in the menu.")
                 }
 
                 Section {
@@ -561,7 +595,7 @@ struct ProjectDetail: View {
                 }
                 HStack {
                     Button("Add Files…", action: addFiles)
-                    Button("Add What's Open…") { store.updateFromOpenWindows(project.id) }
+                    Button("Add Open Windows…") { store.updateFromOpenWindows(project.id) }
                         .help("Add documents open right now and save the layout")
                 }
             } header: {

@@ -58,7 +58,9 @@ enum ScreenSetup {
 @MainActor
 enum Layouts {
     /// Records where this project's windows are right now.
-    static func capture(_ p: Project) -> [SavedFrame] {
+    /// `onlyKnown`: for saving automatically on close, skip an app whose saved window has gone
+    /// (rather than taking whichever is in front) and a minimised Claude.
+    static func capture(_ p: Project, onlyKnown: Bool = false) -> [SavedFrame] {
         guard AX.ensureTrusted() else { return [] }
         var frames: [SavedFrame] = []
 
@@ -79,7 +81,8 @@ enum Layouts {
             guard let id = Bundle(url: URL(fileURLWithPath: expandPath(path)))?.bundleIdentifier else { continue }
             let saved = before.first { $0.kind == "app" && $0.key == path } ?? AppWindows.identity(of: path, in: p)
             let found = saved.flatMap { AppWindows.find(id, $0, fallback: false) }
-            guard let w = found ?? AppWindows.front(id), let r = AX.frame(of: w) else { continue }
+            if onlyKnown && saved != nil && found == nil { continue }
+            guard let w = found ?? AppWindows.front(id), !AX.isMinimized(w), let r = AX.frame(of: w) else { continue }
             var f = SavedFrame(kind: "app", key: path, rect: r)
             f.title = AX.string(w, kAXTitleAttribute)
             if id == Terminal.bundleID, let t = f.title { f.tty = Terminal.tty(windowNamed: t) }
@@ -95,7 +98,7 @@ enum Layouts {
 
         // Claude
         if !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty,
-           let w = ClaudeApp.mainWindow(), let r = AX.frame(of: w) {
+           let w = ClaudeApp.mainWindow(), !(onlyKnown && AX.isMinimized(w)), let r = AX.frame(of: w) {
             frames.append(SavedFrame(kind: "claude", key: "claude", rect: r))
         }
         return frames
@@ -256,7 +259,7 @@ enum Terminal {
     }
 }
 
-// MARK: - "New Project from What's Open"
+// MARK: - "New Project from Open Windows"
 
 @MainActor
 enum Capture {

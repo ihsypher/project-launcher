@@ -537,7 +537,7 @@ enum Brave {
         tell application "\(appName)"
             repeat with w in windows
                 try
-                    if (given name of w) is "\(escape(windowName))" then return bounds of w
+                    if (given name of w) is "\(escape(windowName))" and not (minimized of w) then return bounds of w
                 end try
             end repeat
         end tell
@@ -571,7 +571,7 @@ enum Brave {
         return AppleScriptRunner.result(script)?.booleanValue ?? false
     }
 
-    /// The Brave window you're in (front-most, not minimised), for "New Project from What's Open".
+    /// The Brave window you're in (front-most, not minimised), for "New Project from Open Windows".
     /// If it has no name yet, asks for one (suggesting the current tab's title) and names it in Brave.
     static func captureFrontWindow() -> String? {
         guard isRunning else { return nil }

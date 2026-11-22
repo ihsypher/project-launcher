@@ -209,6 +209,8 @@ final class ProjectStore: ObservableObject {
         Updater.checkForUpdates { [weak self] available in self?.updateAvailable = available }
     }
 
+    func setUpdateAvailable(_ available: Bool) { updateAvailable = available }
+
     // MARK: Open / close
 
     func isOpen(_ p: Project) -> Bool { openIDs.contains(p.id) }
@@ -244,6 +246,9 @@ final class ProjectStore: ObservableObject {
         pausedIDs.remove(p.id)
         var keep = appsInUse(except: p.id)
         if let next { keep.formUnion(apps(of: next)) }
+        if UserDefaults.standard.object(forKey: Self.saveLayoutOnCloseKey) as? Bool ?? true {
+            saveLayoutOnClose(p)
+        }
         Launcher.close(p, keepRunning: keep, keeping: next)
         openIDs.remove(p.id)
         endSession(p.id)
@@ -469,6 +474,11 @@ final class ProjectStore: ObservableObject {
             Log.write("RESTORE open projects: \(projects.filter { openIDs.contains($0.id) }.map(\.name))")
         }
         if !pausedIDs.isEmpty { watchForReturn() }
+        // Quitting from the menu ends the sessions; start counting again from now.
+        let now = Date()
+        for id in openIDs.subtracting(pausedIDs) where projects.first(where: { $0.id == id })?.activeSession == nil {
+            update(id) { $0.activeSession = ActiveSession(start: now, lastBeat: now) }
+        }
     }
 
     /// When the Mac last started up, in seconds since 1970.
@@ -496,6 +506,24 @@ final class ProjectStore: ObservableObject {
     }
 
     // MARK: Layouts and capture
+
+    /// Settings key: closing a project remembers where its windows were.
+    static let saveLayoutOnCloseKey = "saveLayoutOnClose"
+
+    /// Updates the layout for the current screens with the windows found on screen.
+    /// Windows not found (minimised, closed, on another Space) keep their saved place.
+    private func saveLayoutOnClose(_ p: Project) {
+        let found = Layouts.capture(p, onlyKnown: true)
+        guard !found.isEmpty else { return }
+        let key = ScreenSetup.currentKey()
+        var frames = p.layouts[key] ?? []
+        for f in found {
+            frames.removeAll { $0.kind == f.kind && $0.key == f.key }
+        }
+        frames += found
+        update(p.id) { $0.layouts[key] = frames }
+        Log.write("  [layout] saved \(found.count) window\(found.count == 1 ? "" : "s") for \(ScreenSetup.label(key))")
+    }
 
     func saveLayoutsForOpenProjects() {
         ScreenSetup.nameCurrentIfNeeded()
@@ -622,6 +650,55 @@ final class ProjectStore: ObservableObject {
     /// Projects in a group (or ungrouped) that aren't archived, for the menu and sidebar.
     func activeProjects(in groupID: UUID?) -> [Project] {
         projects(in: groupID).filter { !$0.archived }
+    }
+
+    /// Settings key: "manual" (the order in Edit Projects), "recent" or "due".
+    static let menuOrderKey = "menuOrder"
+
+    /// Projects as the menu lists them, in the order chosen in Settings.
+    func menuProjects(in groupID: UUID?) -> [Project] {
+        sortedForMenu(activeProjects(in: groupID))
+    }
+
+    /// Groups with projects to show, ordered by their first project.
+    var menuGroups: [ProjectGroup] {
+        let shown = groups.filter { !activeProjects(in: $0.id).isEmpty }
+        guard menuOrder != "manual" else { return shown }
+        let first = Dictionary(uniqueKeysWithValues: shown.map { ($0.id, menuProjects(in: $0.id)[0]) })
+        let order = sortedForMenu(Array(first.values)).map(\.id)
+        return shown.sorted { order.firstIndex(of: first[$0.id]!.id)! < order.firstIndex(of: first[$1.id]!.id)! }
+    }
+
+    private var menuOrder: String { UserDefaults.standard.string(forKey: Self.menuOrderKey) ?? "manual" }
+
+    private func sortedForMenu(_ list: [Project]) -> [Project] {
+        let manual = Dictionary(uniqueKeysWithValues: projects.enumerated().map { ($1.id, $0) })
+        func byManual(_ a: Project, _ b: Project) -> Bool { manual[a.id, default: 0] < manual[b.id, default: 0] }
+        switch menuOrder {
+        case "recent":
+            return list.sorted { a, b in
+                let (x, y) = (lastUsed(a), lastUsed(b))
+                return x != y ? x > y : byManual(a, b)
+            }
+        case "due":
+            // Soonest deadline first; projects without one after, in manual order.
+            return list.sorted { a, b in
+                switch (a.deadline, b.deadline) {
+                case let (x?, y?): return x != y ? x < y : byManual(a, b)
+                case (_?, nil): return true
+                case (nil, _?): return false
+                default: return byManual(a, b)
+                }
+            }
+        default:
+            return list
+        }
+    }
+
+    /// When the project was last open: now if it's open, else the end of its last session.
+    private func lastUsed(_ p: Project) -> Date {
+        if let a = p.activeSession { return a.lastBeat }
+        return p.timeLog.map(\.end).max() ?? .distantPast
     }
 
     var archivedProjects: [Project] { projects.filter(\.archived) }

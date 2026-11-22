@@ -53,16 +53,16 @@ struct MenuContent: View {
 
         // Each project is a toggle: a tick means it's open. Click to open/close.
         // Groups are submenus of their projects.
-        ForEach(store.activeProjects(in: nil)) { project in
+        ForEach(store.menuProjects(in: nil)) { project in
             ProjectToggle(project: project)
         }
-        ForEach(store.groups.filter { !store.activeProjects(in: $0.id).isEmpty }) { group in
+        ForEach(store.menuGroups) { group in
             GroupMenu(group: group)
         }
 
         Divider()
 
-        Button("New Project from What's Open") { store.captureNewProject() }
+        Button("New Project from Open Windows") { store.captureNewProject() }
         // Only shown while a project is open.
         if !store.openIDs.isEmpty {
             updateMenu
@@ -76,8 +76,9 @@ struct MenuContent: View {
 
         Button("Edit Projects…") { EditorWindow.shared.show(store: store) }
             .keyboardShortcut(",")
-        Button(store.updateAvailable ? "Install Update…" : "Check for Updates…") {
-            Updater.run()
+        // Checking by hand is in Settings; the menu only shows a waiting update.
+        if store.updateAvailable {
+            Button("Install Update…") { Updater.run() }
         }
 
         Divider()
@@ -94,9 +95,9 @@ struct MenuContent: View {
     @ViewBuilder private var updateMenu: some View {
         let open = store.projects.filter { store.isOpen($0) }
         if open.count == 1, let p = open.first {
-            Button("Add What's Open to \(p.name)…") { store.updateFromOpenWindows(p.id) }
+            Button("Add Open Windows to \(p.name)…") { store.updateFromOpenWindows(p.id) }
         } else {
-            Menu("Add What's Open to") {
+            Menu("Add Open Windows to") {
                 ForEach(open) { p in
                     Button(store.displayName(p)) { store.updateFromOpenWindows(p.id) }
                 }
@@ -142,7 +143,7 @@ struct GroupMenu: View {
     let group: ProjectGroup
 
     var body: some View {
-        let members = store.activeProjects(in: group.id)
+        let members = store.menuProjects(in: group.id)
         Menu {
             if members.isEmpty { Text("No projects in this group") }
             ForEach(members) { ProjectToggle(project: $0) }
