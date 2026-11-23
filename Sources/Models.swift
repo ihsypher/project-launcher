@@ -66,10 +66,10 @@ struct Project: Codable, Identifiable, Hashable {
     /// Apps in `files` that should be hidden (not quit) when the project closes.
     var hideAppsOnClose: [String] = []
     /// Apps in `files` whose project window should be minimised (not the app hidden or quit)
-    /// when the project closes. Takes priority over hiding.
+    /// when the project closes. Takes priority over hiding. For documents: minimise the
+    /// document's window instead of closing it.
     var minimiseAppsOnClose: [String] = []
-    /// Word/Excel/PowerPoint files whose app should be quit (not just the file closed)
-    /// when the project closes.
+    /// Documents whose app should be quit (not just the file closed) when the project closes.
     var quitAppsOnClose: [String] = []
     /// A claude.ai chat or project link, opened in the Claude desktop app.
     var claudeLink: String = ""

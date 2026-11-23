@@ -77,6 +77,11 @@ enum Launcher {
                 AppWindows.projectWindows(id, path: path, in: p).forEach { AX.setMinimized($0, false) }
             }
         }
+        // Documents minimised when the project closed (opening a file doesn't always bring it back).
+        let minimisedDocs = p.files.filter { p.minimiseAppsOnClose.contains($0) && wholeAppBundleID($0) == nil }
+        for item in AX.documentWindows(files: minimisedDocs) where AX.isMinimized(item.window) {
+            AX.setMinimized(item.window, false)
+        }
         // Then keep putting windows in place as they appear (documents, new windows).
         // (Claude's waits for Brave: placing a minimised window brings it back.)
         let later = braveFirst ? frames.filter { $0.kind != "claude" } : frames
@@ -100,8 +105,15 @@ enum Launcher {
         // so other modules' files in Word/Excel/Preview are untouched.
         let shared = Set((next?.files ?? []).map(expandPath))
         let docs = p.files.filter { wholeAppBundleID($0) == nil && !shared.contains(expandPath($0)) }
-        if !docs.isEmpty {
-            WindowCloser.close(files: docs)
+        let toMinimise = docs.filter { p.minimiseAppsOnClose.contains($0) }
+        let toClose = docs.filter { !p.minimiseAppsOnClose.contains($0) }
+        if !toClose.isEmpty {
+            WindowCloser.close(files: toClose)
+        }
+        // Documents set to minimise stay open; opening the project brings their window back.
+        for item in AX.documentWindows(files: toMinimise) where !AX.isMinimized(item.window) {
+            Log.write("  minimise \(AX.describe(item.window))")
+            AX.setMinimized(item.window, true)
         }
         // Apps added to the project (e.g. Claude.app), and apps like MATLAB whose files
         // can't be closed one by one: quit them, or hide if chosen.
@@ -1176,7 +1188,7 @@ enum Verify {
     /// Things that should have closed but are still there. Windows asking to save don't count.
     static func afterClose(_ p: Project, keepRunning: Set<String>, _ snap: Snapshot) -> [Issue] {
         var issues: [Issue] = []
-        let docs = p.files.filter { wholeAppBundleID($0) == nil }
+        let docs = p.files.filter { wholeAppBundleID($0) == nil && !p.minimiseAppsOnClose.contains($0) }
         let waiting = Set(AX.documentWindows(files: docs, everywhere: true).filter { AX.hasSheet($0.window) }.map(\.path))
         for f in openDocuments(docs, snap) where !waiting.contains(f) {
             let app = appBundleID(f)

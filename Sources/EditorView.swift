@@ -573,15 +573,16 @@ struct ProjectDetail: View {
                             .help(closesWholeApp(path)
                                   ? "\(appName(for: path)) can't close one file, so it quits, hides or minimises instead"
                                   : "Quit the app, hide all its windows, or minimise just this project's window")
-                        } else if isOfficeDocument(path) {
-                            Picker("On close", selection: officeCloseMode(for: path)) {
+                        } else if appBundleID(path) != nil {
+                            Picker("On close", selection: documentCloseMode(for: path)) {
                                 Text("Close File").tag("file")
+                                Text("Minimise").tag("minimise")
                                 Text("Quit \(appName(for: path).replacingOccurrences(of: "Microsoft ", with: ""))").tag("quit")
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
                             .fixedSize()
-                            .help("Close just this file, or quit the app too (unless another open project uses it)")
+                            .help("Close just this file, minimise its window (it stays open), or close it and quit the app too (unless another open project uses it)")
                         }
                         Button {
                             project.files.removeAll { $0 == path }
@@ -845,12 +846,18 @@ struct ProjectDetail: View {
         return name.hasPrefix("MATLAB") ? "MATLAB" : (name as NSString).deletingPathExtension
     }
 
-    private func officeCloseMode(for path: String) -> Binding<String> {
+    /// For documents: "file" (close it), "minimise" (its window) or "quit" (close it, then the app).
+    private func documentCloseMode(for path: String) -> Binding<String> {
         Binding(
-            get: { project.quitAppsOnClose.contains(path) ? "quit" : "file" },
+            get: {
+                project.quitAppsOnClose.contains(path) ? "quit"
+                    : project.minimiseAppsOnClose.contains(path) ? "minimise" : "file"
+            },
             set: { mode in
                 project.quitAppsOnClose.removeAll { $0 == path }
+                project.minimiseAppsOnClose.removeAll { $0 == path }
                 if mode == "quit" { project.quitAppsOnClose.append(path) }
+                if mode == "minimise" { project.minimiseAppsOnClose.append(path) }
             }
         )
     }
