@@ -148,18 +148,90 @@ enum Layouts {
     /// every second up to 9s. Then everything is checked once more 1.5s later in case an app
     /// moved its own window while loading. Stops if the project is closed again in the meantime.
     static func applySoon(_ frames: [SavedFrame], while stillOpen: @escaping @MainActor () -> Bool) {
+        var waiting = Set(frames)
+        func placeWaiting() {
+            guard !waiting.isEmpty, stillOpen() else { return }
+            waiting.subtract(apply(Array(waiting)))
+        }
+        // Windows the apps create (e.g. Word opening a document on another screen) are moved
+        // the moment they appear, and once more just after, in case the title came a bit later.
+        // The timer below catches anything this misses.
+        let apps = Set(frames.compactMap { f -> String? in
+            switch f.kind {
+            case "file": return appBundleID(f.key)
+            case "app": return Bundle(url: URL(fileURLWithPath: expandPath(f.key)))?.bundleIdentifier
+            default: return nil
+            }
+        })
+        let watch = NewWindowWatch(bundleIDs: apps) {
+            placeWaiting()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { placeWaiting() } }
+        }
         Task { @MainActor in
-            var waiting = Set(frames)
+            defer { watch.stop() }
             let delays = [0.3, 0.3, 0.4, 0.5, 0.5, 0.5, 0.5, 0.5, 1, 1, 1, 1, 1]
             for delay in delays where !waiting.isEmpty {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 guard stillOpen() else { return }
-                waiting.subtract(apply(Array(waiting)))
+                placeWaiting()
             }
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             guard stillOpen() else { return }
             apply(frames.filter { !waiting.contains($0) })
         }
+    }
+}
+
+/// Calls back whenever one of these apps creates or switches to a window, including apps
+/// that start up while watching.
+@MainActor
+final class NewWindowWatch {
+    private let bundleIDs: Set<String>
+    private let onWindow: @MainActor () -> Void
+    private var observers: [pid_t: AXObserver] = [:]
+    private var launchWatcher: NSObjectProtocol?
+
+    init(bundleIDs: Set<String>, onWindow: @escaping @MainActor () -> Void) {
+        self.bundleIDs = bundleIDs
+        self.onWindow = onWindow
+        guard !bundleIDs.isEmpty, AX.ensureTrusted(prompt: false) else { return }
+        for id in bundleIDs {
+            NSRunningApplication.runningApplications(withBundleIdentifier: id).forEach { watch($0.processIdentifier) }
+        }
+        launchWatcher = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            MainActor.assumeIsolated {
+                guard let self, let app, let id = app.bundleIdentifier, self.bundleIDs.contains(id) else { return }
+                self.watch(app.processIdentifier)
+            }
+        }
+    }
+
+    private func watch(_ pid: pid_t) {
+        guard observers[pid] == nil else { return }
+        var observer: AXObserver?
+        guard AXObserverCreate(pid, { _, _, _, refcon in
+            guard let refcon else { return }
+            let watch = Unmanaged<NewWindowWatch>.fromOpaque(refcon).takeUnretainedValue()
+            MainActor.assumeIsolated { watch.onWindow() }
+        }, &observer) == .success, let observer else { return }
+        let app = AXUIElementCreateApplication(pid)
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        for name in [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification] {
+            AXObserverAddNotification(observer, app, name as CFString, me)
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        observers[pid] = observer
+    }
+
+    func stop() {
+        for observer in observers.values {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        }
+        observers = [:]
+        if let launchWatcher { NSWorkspace.shared.notificationCenter.removeObserver(launchWatcher) }
+        launchWatcher = nil
     }
 }
 
