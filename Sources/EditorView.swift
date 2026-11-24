@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import AppKit
 
 struct EditorView: View {
@@ -550,11 +551,16 @@ struct ProjectDetail: View {
             Section {
                 ForEach(project.files, id: \.self) { path in
                     HStack {
-                        Image(nsImage: NSWorkspace.shared.icon(forFile: expandPath(path)))
+                        Image(nsImage: isCloudDocument(path)
+                              ? NSWorkspace.shared.icon(for: UTType(filenameExtension: (path as NSString).pathExtension) ?? .data)
+                              : NSWorkspace.shared.icon(forFile: expandPath(path)))
                             .resizable()
                             .frame(width: 18, height: 18)
                         Text((path as NSString).lastPathComponent)
-                        if !FileManager.default.fileExists(atPath: expandPath(path)) {
+                        if isCloudDocument(path) {
+                            Image(systemName: "cloud").foregroundStyle(.secondary)
+                                .help("Online only: opens from OneDrive/SharePoint")
+                        } else if !FileManager.default.fileExists(atPath: expandPath(path)) {
                             Text("missing").font(.caption).foregroundStyle(.red)
                             Button("Find…") { relink(path) }
                                 .controlSize(.small)
@@ -841,7 +847,9 @@ struct ProjectDetail: View {
 
     /// e.g. "MATLAB" for a .m file.
     private func appName(for path: String) -> String {
-        guard let url = defaultApp(for: URL(fileURLWithPath: expandPath(path))) else { return "App" }
+        guard let url = isCloudDocument(path)
+                ? appBundleID(path).flatMap(NSWorkspace.shared.urlForApplication(withBundleIdentifier:))
+                : defaultApp(for: URL(fileURLWithPath: expandPath(path))) else { return "App" }
         let name = FileManager.default.displayName(atPath: url.path)
         return name.hasPrefix("MATLAB") ? "MATLAB" : (name as NSString).deletingPathExtension
     }

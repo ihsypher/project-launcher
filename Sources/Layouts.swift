@@ -278,6 +278,10 @@ enum Capture {
     static func openFiles() -> [String] {
         var paths: [String] = []
         func add(_ path: String) {
+            if isCloudDocument(path) {
+                if !paths.contains(path) { paths.append(path) }
+                return
+            }
             let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
             var isFolder: ObjCBool = false
             guard FileManager.default.fileExists(atPath: resolved, isDirectory: &isFolder) else { return }
@@ -449,10 +453,8 @@ enum Office {
                 guard let pair = r.atIndex(i), pair.numberOfItems == 2,
                       var path = pair.atIndex(1)?.stringValue,
                       let name = pair.atIndex(2)?.stringValue else { continue }
-                if path.contains("://") {
-                    guard let local = OneDrive.localPath(for: path) else { continue }
-                    path = local
-                }
+                // A synced OneDrive file by its copy on this Mac; online-only ones by their address.
+                if path.contains("://") { path = OneDrive.localPath(for: path) ?? path }
                 out.append(OpenDocument(appID: app.id, collection: app.collection, path: path, name: name))
             }
         }
@@ -506,10 +508,7 @@ enum Office {
                 let f = line.components(separatedBy: "\t")
                 guard f.count >= 3, let app = apps.first(where: { $0.id == f[0] }) else { return nil }
                 var path = f[1]
-                if path.contains("://") {
-                    guard let local = OneDrive.localPath(for: path) else { return nil }
-                    path = local
-                }
+                if path.contains("://") { path = OneDrive.localPath(for: path) ?? path }
                 return OpenDocument(appID: app.id, collection: app.collection, path: path,
                                     name: f[2...].joined(separator: "\t"))
             })

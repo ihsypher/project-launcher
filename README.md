@@ -60,6 +60,7 @@ Each rebuild gets a new ad-hoc signature, so macOS can forget the permissions. S
 - Backups: your projects, groups and time are backed up once a day to iCloud Drive > Project Launcher Backups (or Application Support if iCloud Drive is off), keeping the last 30. Edit Projects > gear icon > Backups has **Back Up Now**, **Show Backups** and **Restore…** (which backs up the current list first).
 - Open projects stay ticked (and keep counting time) if Project Launcher restarts, e.g. after an update, but not after the Mac restarts.
 - Start at login: Edit Projects > gear icon > **Open Project Launcher at login**.
+- Online-only Word, Excel and PowerPoint documents (e.g. shared from someone else's OneDrive, not synced to this Mac) are kept by their web address (shown with a cloud) and opened in the app from there. Documents in your own synced OneDrive folder use the file on your Mac.
 - A missing file (moved or renamed) shows **Find...** in Edit Projects: it looks for a file with the same name, or lets you pick it, keeping its settings and layout.
 
 ## If the build fails

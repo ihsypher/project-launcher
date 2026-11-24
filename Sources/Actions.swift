@@ -6,8 +6,61 @@ import ApplicationServices
 @MainActor
 enum Launcher {
     /// `stillOpen` stops the layout being re-applied once the project has been closed again.
+    ///
+    /// Windows end up with the browser at the back, Claude above it and the project's documents
+    /// and apps in front. With Brave already running (about 0.8s), everything else waits for it,
+    /// so nothing swaps places. If Brave has to start up, or takes over 1.5s, the rest opens
+    /// anyway and is raised again once Brave is done.
     static func open(_ p: Project, stillOpen: @escaping @MainActor () -> Bool = { true }) {
         Log.write("OPEN \(p.name): files=\(p.files) brave=\(p.braveWindowNames) claude=\(p.claudeLink)")
+        // Saved positions for these screens (only for files still in the project).
+        let frames = p.layouts[ScreenSetup.currentKey()]?.filter { $0.kind != "file" || p.files.contains($0.key) } ?? []
+        let hasClaude = !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty
+        let hasBrave = !p.braveWindowNames.isEmpty || !p.urls.isEmpty
+        let braveFirst = !p.braveWindowNames.isEmpty && Brave.isRunning
+        // Claude coming back from here on is the project's doing, not a reset to a new chat.
+        if hasClaude { ClaudeApp.projectIsOpening() }
+        let started = Date()
+        var restOpened = false
+        func openRest(_ why: String) {
+            guard !restOpened, stillOpen() else { return }
+            restOpened = true
+            Log.write(String(format: "  [%.2fs] open the rest (%@)", Date().timeIntervalSince(started), why))
+            openClaudeAndFiles(p, frames)
+            // Keep putting windows in place as they appear (documents, new windows).
+            if !frames.isEmpty { Layouts.applySoon(frames, while: stillOpen) }
+        }
+        if braveFirst {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                MainActor.assumeIsolated { openRest("Brave took too long") }
+            }
+        } else {
+            openRest(hasBrave ? "Brave not running" : "no Brave window")
+        }
+        let windows = p.braveWindowNames.isEmpty ? [""] : p.braveWindowNames
+        for (i, name) in windows.enumerated() {
+            let last = i == windows.count - 1
+            let bounds = frames.first { $0.kind == "brave" && $0.key == name }?.rect
+            Brave.show(windowName: name, urls: i == 0 ? p.urls : [], bounds: bounds) {
+                guard last, hasBrave, stillOpen() else { return }
+                Log.write(String(format: "  [%.2fs] Brave done", Date().timeIntervalSince(started)))
+                if restOpened { bringToFront(p) } else { openRest("after Brave") }
+            }
+        }
+    }
+
+    /// Claude first, then the files and apps, so the last to become active (a document) is in front.
+    private static func openClaudeAndFiles(_ p: Project, _ frames: [SavedFrame]) {
+        if !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty {
+            // Claude becomes the active app before its window comes back, or Claude drops the
+            // window behind the others and raises it again when it takes the focus.
+            ClaudeApp.activate()
+            Layouts.apply(frames.filter { $0.kind == "claude" })
+            ClaudeApp.open(link: p.claudeLink)
+        }
+        // App windows already there (usually minimised) go to their place before they come
+        // back, so they appear straight in position instead of jumping.
+        Layouts.apply(frames.filter { $0.kind == "app" })
         var missing: [String] = []
         for path in p.files {
             let full = expandPath(path)
@@ -17,6 +70,12 @@ enum Launcher {
                 // so just switch to it.
                 app.unhide()
                 app.activate()
+            } else if isCloudDocument(path) {
+                // Online only: its Office app opens it from the web address.
+                if let url = cloudURL(path), let id = appBundleID(path),
+                   let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
+                    NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
+                }
             } else if FileManager.default.fileExists(atPath: full) {
                 NSWorkspace.shared.open(URL(fileURLWithPath: full))
             } else {
@@ -27,51 +86,8 @@ enum Launcher {
             Alerts.show("Some files couldn't be found",
                         "These may have been moved or renamed:\n\n" + missing.joined(separator: "\n"))
         }
-        // Backup pages go with the first window, if it isn't open.
-        // Saved positions for these screens (only for files still in the project).
-        let frames = p.layouts[ScreenSetup.currentKey()]?.filter { $0.kind != "file" || p.files.contains($0.key) } ?? []
-        // The chat should end up in front of the browser. With Brave already running (it takes
-        // about 0.3s), Claude waits for it, so nothing swaps places. If Brave has to start up,
-        // or takes over 1.5s, Claude opens anyway and is raised again once Brave is done.
-        let hasClaude = !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty
-        let braveFirst = hasClaude && !p.braveWindowNames.isEmpty && Brave.isRunning
-        // Claude coming back from here on is the project's doing, not a reset to a new chat.
-        if hasClaude { ClaudeApp.projectIsOpening() }
-        // App and Claude windows already there (usually minimised) go to their place before
-        // they come back, so they appear straight in position instead of jumping.
-        Layouts.apply(frames.filter { $0.kind == "app" || (!braveFirst && $0.kind == "claude") })
-        var claudeOpened = false
-        let started = Date()
-        func openClaude(_ why: String) {
-            guard !claudeOpened, stillOpen() else { return }
-            claudeOpened = true
-            Log.write(String(format: "  [%.2fs] open Claude (%@)", Date().timeIntervalSince(started), why))
-            // Claude becomes the active app before its window comes back, or Claude drops the
-            // window behind the others and raises it again when it takes the focus.
-            ClaudeApp.activate()
-            if braveFirst { Layouts.apply(frames.filter { $0.kind == "claude" }) }
-            ClaudeApp.open(link: p.claudeLink)
-        }
-        if braveFirst {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                MainActor.assumeIsolated { openClaude("Brave took too long") }
-            }
-        } else {
-            openClaude(hasClaude && !p.braveWindowNames.isEmpty ? "Brave not running" : "no Brave window")
-        }
-        let windows = p.braveWindowNames.isEmpty ? [""] : p.braveWindowNames
-        for (i, name) in windows.enumerated() {
-            let last = i == windows.count - 1
-            let bounds = frames.first { $0.kind == "brave" && $0.key == name }?.rect
-            Brave.show(windowName: name, urls: i == 0 ? p.urls : [], bounds: bounds) {
-                guard last, hasClaude, !p.braveWindowNames.isEmpty, stillOpen() else { return }
-                Log.write(String(format: "  [%.2fs] Brave done", Date().timeIntervalSince(started)))
-                if claudeOpened { ClaudeApp.bringToFront(); return }
-                openClaude("after Brave")
-            }
-        }
         // Minimised app windows without a saved position (those are restored with the layout).
-        let placed = Set((p.layouts[ScreenSetup.currentKey()] ?? []).filter { $0.kind == "app" }.map(\.key))
+        let placed = Set(frames.filter { $0.kind == "app" }.map(\.key))
         for path in p.files where p.minimiseAppsOnClose.contains(path) && !placed.contains(path) {
             if let id = wholeAppBundleID(path) {
                 AppWindows.projectWindows(id, path: path, in: p).forEach { AX.setMinimized($0, false) }
@@ -82,10 +98,26 @@ enum Launcher {
         for item in AX.documentWindows(files: minimisedDocs) where AX.isMinimized(item.window) {
             AX.setMinimized(item.window, false)
         }
-        // Then keep putting windows in place as they appear (documents, new windows).
-        // (Claude's waits for Brave: placing a minimised window brings it back.)
-        let later = braveFirst ? frames.filter { $0.kind != "claude" } : frames
-        if !later.isEmpty { Layouts.applySoon(later, while: stillOpen) }
+    }
+
+    /// Puts the project's windows back above Brave's (when Brave finished after them):
+    /// Claude, then the documents and apps, with the first of those made active.
+    private static func bringToFront(_ p: Project) {
+        if let w = ClaudeApp.mainWindow(), !AX.isMinimized(w) {
+            AXUIElementPerformAction(w, kAXRaiseAction as CFString)
+        }
+        var windows = AX.documentWindows(files: p.files.filter { wholeAppBundleID($0) == nil }).map(\.window)
+        for path in p.files where isApp(path) {
+            if let id = wholeAppBundleID(path) { windows += AppWindows.projectWindows(id, path: path, in: p) }
+        }
+        windows = windows.filter { !AX.isMinimized($0) }
+        windows.reversed().forEach { AXUIElementPerformAction($0, kAXRaiseAction as CFString) }
+        var pid: pid_t = 0
+        if let front = windows.first, AXUIElementGetPid(front, &pid) == .success {
+            NSRunningApplication(processIdentifier: pid)?.activate()
+        } else if !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty {
+            ClaudeApp.bringToFront()
+        }
     }
 
     /// A project app that's already running and whose project window is known and still there.
@@ -1166,7 +1198,9 @@ enum Verify {
     /// Things that should have opened but aren't there.
     static func afterOpen(_ p: Project, _ snap: Snapshot) -> [Issue] {
         var issues: [Issue] = []
-        let docs = p.files.filter { wholeAppBundleID($0) == nil && FileManager.default.fileExists(atPath: expandPath($0)) }
+        let docs = p.files.filter {
+            wholeAppBundleID($0) == nil && (isCloudDocument($0) || FileManager.default.fileExists(atPath: expandPath($0)))
+        }
         let open = openDocuments(docs, snap)
         for f in docs where !open.contains(f) {
             issues.append(Issue(text: "\(name(f)) didn't open"))

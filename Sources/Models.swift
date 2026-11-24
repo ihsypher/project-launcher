@@ -927,6 +927,27 @@ enum AppLookupCache {
     static let shared = NSCache<NSString, AppLookup>()
 }
 
+/// A document that's only online (e.g. shared from someone else's OneDrive), kept by its
+/// web address as Word/Excel/PowerPoint report it: "https://...sharepoint.com/.../File.docx".
+func isCloudDocument(_ path: String) -> Bool {
+    path.hasPrefix("https://")
+}
+
+/// The web address of an online document, ready to hand to its Office app.
+func cloudURL(_ path: String) -> URL? {
+    path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed).flatMap(URL.init(string:))
+}
+
+/// The Office app for an online document, from its extension.
+private func cloudDocumentApp(_ path: String) -> String? {
+    switch (path as NSString).pathExtension.lowercased() {
+    case "docx", "doc", "docm", "dotx", "rtf": return "com.microsoft.Word"
+    case "xlsx", "xls", "xlsm", "xlsb", "csv": return "com.microsoft.Excel"
+    case "pptx", "ppt", "pptm": return "com.microsoft.Powerpoint"
+    default: return nil
+    }
+}
+
 func isApp(_ path: String) -> Bool {
     (path as NSString).pathExtension.lowercased() == "app"
 }
@@ -938,6 +959,7 @@ private let wholeAppDocumentApps: Set<String> = ["com.mathworks.matlab"]
 /// The app that closing this entry quits or hides: the app itself for a .app,
 /// or e.g. MATLAB for a .m file. nil for ordinary documents.
 func wholeAppBundleID(_ path: String) -> String? {
+    if isCloudDocument(path) { return nil }
     let url = URL(fileURLWithPath: expandPath(path))
     if isApp(path) { return Bundle(url: url)?.bundleIdentifier }
     guard let appURL = defaultApp(for: url),
@@ -947,6 +969,7 @@ func wholeAppBundleID(_ path: String) -> String? {
 
 /// The app that opens this entry: the app itself for a .app, otherwise the file's default app.
 func appBundleID(_ path: String) -> String? {
+    if isCloudDocument(path) { return cloudDocumentApp(path) }
     let url = URL(fileURLWithPath: expandPath(path))
     if isApp(path) { return Bundle(url: url)?.bundleIdentifier }
     return defaultApp(for: url).flatMap { Bundle(url: $0)?.bundleIdentifier }
