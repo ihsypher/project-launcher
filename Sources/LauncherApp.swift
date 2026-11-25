@@ -66,7 +66,7 @@ struct MenuContent: View {
         // Only shown while a project is open.
         if !store.openIDs.isEmpty {
             updateMenu
-            Button(ScreenSetup.name(ScreenSetup.currentKey()).map { "Save Window Positions for \($0)" } ?? "Save Window Positions") {
+            Button(ScreenSetup.name(ScreenSetup.activeKey()).map { "Save Window Positions for \($0)" } ?? "Save Window Positions") {
                 store.saveLayoutsForOpenProjects()
             }
             Button("Close All Projects") { store.closeAll() }

@@ -387,7 +387,7 @@ struct SettingsView: View {
                             set: { screenNames[key] = $0; ScreenSetup.setName($0, for: key) }
                         ), prompt: Text(ScreenSetup.label(key))) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(key == ScreenSetup.currentKey() ? "Connected now" : "Screen setup")
+                                Text(key == ScreenSetup.activeKey() ? "Connected now" : "Screen setup")
                                 Text(key).font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -799,7 +799,7 @@ struct ProjectDetail: View {
         return parts.joined(separator: " · ")
     }
 
-    private var currentScreens: String { ScreenSetup.currentKey() }
+    private var currentScreens: String { ScreenSetup.activeKey() }
 
     private var layoutKeys: [String] {
         project.layouts.keys.sorted { a, b in
@@ -817,6 +817,7 @@ struct ProjectDetail: View {
         } else {
             ScreenSetup.nameCurrentIfNeeded()
             project.layouts[currentScreens] = frames
+            ScreenSetup.remember(currentScreens)
             layoutMessage = "Saved \(frames.count) window\(frames.count == 1 ? "" : "s") for \(ScreenSetup.label(currentScreens))."
         }
     }

@@ -5,6 +5,11 @@ import AppKit
 /// Identifies which screens are connected, e.g. "Built-in Retina Display 1512x982"
 /// or "Built-in Retina Display 1512x982 + DELL U2720Q 2560x1440".
 /// Each project keeps one window layout per screen setup.
+///
+/// Desks with the same kind of screens count as one setup: at a shared desk the monitor can be
+/// a different model, size or arrangement each time. If these exact screens have no layout, one
+/// saved for the laptop plus the same number of screens from the same maker (e.g. any HP) is
+/// used, and every window is moved onto the matching screen at the same place relative to it.
 @MainActor
 enum ScreenSetup {
     static func currentKey() -> String {
@@ -14,12 +19,167 @@ enum ScreenSetup {
             .joined(separator: " + ")
     }
 
+    /// Every setup with a saved layout in some project (kept up to date by ProjectStore).
+    static var savedKeys: Set<String> = []
+
+    /// The setup these screens count as: themselves if they have a layout or a name, otherwise
+    /// a known setup of the same kind (preferring one with the same screen sizes), otherwise new.
+    static func activeKey() -> String {
+        let current = currentKey()
+        let known = savedKeys.union(names.keys)
+        if known.contains(current) { return current }
+        return similar(to: current, among: known).first ?? current
+    }
+
+    /// Known setups of the same kind as `key`, best match first.
+    private static func similar(to key: String, among keys: Set<String>) -> [String] {
+        let kind = self.kind(key)
+        let sizes = Set(parts(key).map(\.size))
+        return keys.filter { $0 != key && self.kind($0) == kind }.sorted { a, b in
+            let sa = Set(parts(a).map(\.size)) == sizes, sb = Set(parts(b).map(\.size)) == sizes
+            if sa != sb { return sa }
+            let na = name(a) != nil, nb = name(b) != nil
+            if na != nb { return na }
+            return a < b
+        }
+    }
+
+    /// "Built-in Retina Display 1512x982" -> name and size.
+    private static func parts(_ key: String) -> [(name: String, size: String)] {
+        key.components(separatedBy: " + ").map { part in
+            var words = part.components(separatedBy: " ")
+            let size = words.count > 1 ? words.removeLast() : ""
+            return (words.joined(separator: " "), size)
+        }
+    }
+
+    /// What kind of setup: whether the laptop screen is on, and the maker of each other screen
+    /// (the first word of its name, e.g. "HP"), so "HP E24 G4" and "HP E243i" are alike.
+    private static func kind(_ key: String) -> String {
+        let screens = parts(key).map(\.name)
+        let builtIn = screens.filter { $0.contains("Built-in") }.count
+        let makers = screens.filter { !$0.contains("Built-in") }
+            .map { $0.components(separatedBy: " ").first?.lowercased() ?? "" }.sorted()
+        return "\(builtIn)|" + makers.joined(separator: ",")
+    }
+
+    // MARK: Where the screens were
+
+    /// A screen's place, in window coordinates (top left of the main screen is 0,0).
+    struct Screen: Codable {
+        var name: String
+        var x: Double, y: Double, w: Double, h: Double
+        var rect: CGRect { CGRect(x: x, y: y, width: w, height: h) }
+        var builtIn: Bool { name.contains("Built-in") }
+    }
+
+    static func currentScreens() -> [Screen] {
+        guard let mainHeight = NSScreen.screens.first?.frame.height else { return [] }
+        return NSScreen.screens.map { s in
+            Screen(name: s.localizedName, x: s.frame.minX, y: mainHeight - s.frame.maxY,
+                   w: s.frame.width, h: s.frame.height)
+        }
+    }
+
+    private static let geometryKey = "screenSetupGeometry"
+
+    /// Where the screens were when a layout was last saved for this setup.
+    private static func geometry(_ key: String) -> [Screen]? {
+        guard let data = UserDefaults.standard.data(forKey: geometryKey),
+              let all = try? JSONDecoder().decode([String: [Screen]].self, from: data) else { return nil }
+        return all[key]
+    }
+
+    /// Notes where the screens are now, for a layout just saved under `key`.
+    static func remember(_ key: String) {
+        var all: [String: [Screen]] = [:]
+        if let data = UserDefaults.standard.data(forKey: geometryKey),
+           let decoded = try? JSONDecoder().decode([String: [Screen]].self, from: data) { all = decoded }
+        all[key] = currentScreens()
+        if let data = try? JSONEncoder().encode(all) { UserDefaults.standard.set(data, forKey: geometryKey) }
+    }
+
+    /// The project's layout for the screens connected now, moved to where those screens are:
+    /// this setup's own, or else one from a setup of the same kind.
+    static func layout(for p: Project) -> [SavedFrame] {
+        let key = activeKey()
+        let candidates = [key] + similar(to: key, among: Set(p.layouts.keys))
+        guard let from = candidates.first(where: { p.layouts[$0]?.isEmpty == false }),
+              let frames = p.layouts[from] else { return [] }
+        return translate(frames, from: geometry(from))
+    }
+
+    /// Moves frames saved with the screens at `old` onto the screens connected now: each onto
+    /// its screen's counterpart (same screen, else the laptop for the laptop, else left to right),
+    /// at the same place relative to it, scaled if the size differs, and kept on screen.
+    static func translate(_ frames: [SavedFrame], from old: [Screen]?) -> [SavedFrame] {
+        let now = currentScreens()
+        guard !now.isEmpty else { return frames }
+        let pairs = old.map { pair($0, now) } ?? [:]
+        return frames.map { f in
+            var r = f.rect
+            if let old, let i = screenIndex(for: r, in: old.map(\.rect)) {
+                let a = old[i], b = pairs[i] ?? now[0]
+                let sx = b.w / a.w, sy = b.h / a.h
+                r = CGRect(x: b.x + (r.minX - a.x) * sx, y: b.y + (r.minY - a.y) * sy,
+                           width: r.width * sx, height: r.height * sy)
+            }
+            var out = f
+            let fitted = fit(r, in: now.map(\.rect))
+            out.x = Double(fitted.minX); out.y = Double(fitted.minY)
+            out.w = Double(fitted.width); out.h = Double(fitted.height)
+            return out
+        }
+    }
+
+    /// Which new screen stands in for each old one.
+    private static func pair(_ old: [Screen], _ now: [Screen]) -> [Int: Screen] {
+        var result: [Int: Screen] = [:]
+        var left = Array(now.indices)
+        func take(_ i: Int, where match: (Screen) -> Bool) {
+            guard result[i] == nil, let j = left.firstIndex(where: { match(now[$0]) }) else { return }
+            result[i] = now[left.remove(at: j)]
+        }
+        for i in old.indices { take(i) { $0.name == old[i].name && $0.w == old[i].w && $0.h == old[i].h } }
+        for i in old.indices { take(i) { $0.name == old[i].name } }
+        for i in old.indices where old[i].builtIn { take(i) { $0.builtIn } }
+        // The rest in order from left to right (then top to bottom).
+        let order: (Screen, Screen) -> Bool = { $0.x != $1.x ? $0.x < $1.x : $0.y < $1.y }
+        let oldRest = old.indices.filter { result[$0] == nil }.sorted { order(old[$0], old[$1]) }
+        left.sort { order(now[$0], now[$1]) }
+        for (i, j) in zip(oldRest, left) { result[i] = now[j] }
+        return result
+    }
+
+    /// The screen a window is on: the one holding its centre, else the one it overlaps most.
+    private static func screenIndex(for r: CGRect, in screens: [CGRect]) -> Int? {
+        let centre = CGPoint(x: r.midX, y: r.midY)
+        if let i = screens.firstIndex(where: { $0.contains(centre) }) { return i }
+        let overlaps = screens.map { $0.intersection(r) }.map { $0.isNull ? 0 : $0.width * $0.height }
+        guard let best = overlaps.indices.max(by: { overlaps[$0] < overlaps[$1] }), overlaps[best] > 0 else { return nil }
+        return best
+    }
+
+    /// Keeps a window on one of the screens: no bigger than it, and not hanging off its edges.
+    private static func fit(_ r: CGRect, in screens: [CGRect]) -> CGRect {
+        guard !screens.isEmpty else { return r }
+        let s = screenIndex(for: r, in: screens).map { screens[$0] } ?? screens[0]
+        let w = min(r.width, s.width), h = min(r.height, s.height)
+        let x = min(max(r.minX, s.minX), s.maxX - w), y = min(max(r.minY, s.minY), s.maxY - h)
+        return CGRect(x: x.rounded(), y: y.rounded(), width: w.rounded(), height: h.rounded())
+    }
+
+    // MARK: Names
+
     static let namesKey = "screenSetupNames"
+
+    private static var names: [String: String] {
+        (UserDefaults.standard.dictionary(forKey: namesKey) as? [String: String] ?? [:]).filter { !$0.value.isEmpty }
+    }
 
     /// The name you gave a screen setup, e.g. "Laptop" or "Desk".
     static func name(_ key: String) -> String? {
-        let names = UserDefaults.standard.dictionary(forKey: namesKey) as? [String: String] ?? [:]
-        return names[key].flatMap { $0.isEmpty ? nil : $0 }
+        names[key]
     }
 
     static func setName(_ name: String, for key: String) {
@@ -35,7 +195,7 @@ enum ScreenSetup {
 
     /// Asks for a name for the screens connected now, the first time a layout is saved for them.
     static func nameCurrentIfNeeded() {
-        let key = currentKey()
+        let key = activeKey()
         guard name(key) == nil else { return }
         let laptopOnly = !key.contains(" + ") && key.contains("Built-in")
         if let name = Alerts.askText("Name these screens",
@@ -48,7 +208,7 @@ enum ScreenSetup {
     /// Every screen setup with a saved layout, plus the current one.
     static func known(in projects: [Project]) -> [String] {
         var keys = Set(projects.flatMap { $0.layouts.keys })
-        keys.insert(currentKey())
+        keys.insert(activeKey())
         return keys.sorted { label($0) < label($1) }
     }
 }
@@ -76,7 +236,7 @@ enum Layouts {
         }
 
         // Apps added to the project: the window saved before if it's still there, else the front one.
-        let before = p.layouts[ScreenSetup.currentKey()] ?? []
+        let before = ScreenSetup.layout(for: p)
         for path in p.files where isApp(path) {
             guard let id = Bundle(url: URL(fileURLWithPath: expandPath(path)))?.bundleIdentifier else { continue }
             let saved = before.first { $0.kind == "app" && $0.key == path } ?? AppWindows.identity(of: path, in: p)
@@ -282,7 +442,7 @@ enum AppWindows {
     /// Which window of an app is the project's: from the layout for these screens, or any other
     /// screen setup's if there isn't one here (the window is the same, only its position differs).
     static func identity(of path: String, in p: Project) -> SavedFrame? {
-        let current = ScreenSetup.currentKey()
+        let current = ScreenSetup.activeKey()
         let layouts = [p.layouts[current] ?? []] + p.layouts.filter { $0.key != current }.map(\.value)
         return layouts.lazy.compactMap { $0.first { $0.kind == "app" && $0.key == path && $0.title != nil } }.first
     }

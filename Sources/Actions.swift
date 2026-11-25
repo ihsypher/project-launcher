@@ -14,7 +14,7 @@ enum Launcher {
     static func open(_ p: Project, stillOpen: @escaping @MainActor () -> Bool = { true }) {
         Log.write("OPEN \(p.name): files=\(p.files) brave=\(p.braveWindowNames) claude=\(p.claudeLink)")
         // Saved positions for these screens (only for files still in the project).
-        let frames = p.layouts[ScreenSetup.currentKey()]?.filter { $0.kind != "file" || p.files.contains($0.key) } ?? []
+        let frames = ScreenSetup.layout(for: p).filter { $0.kind != "file" || p.files.contains($0.key) }
         let hasClaude = !p.claudeLink.trimmingCharacters(in: .whitespaces).isEmpty
         let hasBrave = !p.braveWindowNames.isEmpty || !p.urls.isEmpty
         let braveFirst = !p.braveWindowNames.isEmpty && Brave.isRunning

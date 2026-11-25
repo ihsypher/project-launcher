@@ -150,7 +150,10 @@ extension Project {
 @MainActor
 final class ProjectStore: ObservableObject {
     @Published var projects: [Project] = [] {
-        didSet { save() }
+        didSet {
+            ScreenSetup.savedKeys = Set(projects.flatMap { $0.layouts.keys })
+            save()
+        }
     }
     /// Named groups of projects (e.g. "Radiation"), shown as submenus.
     @Published var groups: [ProjectGroup] = [] {
@@ -515,19 +518,22 @@ final class ProjectStore: ObservableObject {
     private func saveLayoutOnClose(_ p: Project) {
         let found = Layouts.capture(p, onlyKnown: true)
         guard !found.isEmpty else { return }
-        let key = ScreenSetup.currentKey()
-        var frames = p.layouts[key] ?? []
+        let key = ScreenSetup.activeKey()
+        // The saved places, moved to where the screens are now, so the ones kept fit with the new.
+        var frames = ScreenSetup.layout(for: p)
         for f in found {
             frames.removeAll { $0.kind == f.kind && $0.key == f.key }
         }
         frames += found
         update(p.id) { $0.layouts[key] = frames }
+        ScreenSetup.remember(key)
         Log.write("  [layout] saved \(found.count) window\(found.count == 1 ? "" : "s") for \(ScreenSetup.label(key))")
     }
 
     func saveLayoutsForOpenProjects() {
         ScreenSetup.nameCurrentIfNeeded()
-        let key = ScreenSetup.currentKey()
+        let key = ScreenSetup.activeKey()
+        ScreenSetup.remember(key)
         var lines: [String] = []
         for p in projects where openIDs.contains(p.id) {
             let frames = Layouts.capture(p)
@@ -560,7 +566,10 @@ final class ProjectStore: ObservableObject {
             p.minimiseAppsOnClose.append(contentsOf: chosen)
         }
         let frames = Layouts.capture(p)
-        if !frames.isEmpty { p.layouts[ScreenSetup.currentKey()] = frames }
+        if !frames.isEmpty {
+            p.layouts[ScreenSetup.activeKey()] = frames
+            ScreenSetup.remember(ScreenSetup.activeKey())
+        }
         let now = Date()
         p.activeSession = ActiveSession(start: now, lastBeat: now)
         projects.append(p)
@@ -612,7 +621,11 @@ final class ProjectStore: ObservableObject {
         }
         if let updated = projects.first(where: { $0.id == id }) {
             let frames = Layouts.capture(updated)
-            if !frames.isEmpty { update(id) { $0.layouts[ScreenSetup.currentKey()] = frames } }
+            if !frames.isEmpty {
+                let key = ScreenSetup.activeKey()
+                update(id) { $0.layouts[key] = frames }
+                ScreenSetup.remember(key)
+            }
         }
     }
 
