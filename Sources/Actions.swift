@@ -1104,19 +1104,27 @@ enum WindowCloser {
     /// its empty window stuck on screen. Marks them as handled so they aren't pressed too.
     private static func closeOfficeDocuments(_ files: [String], _ seen: Seen, open: [Office.OpenDocument]) {
         var byPath: [String: String] = [:]
-        for f in files { byPath[URL(fileURLWithPath: expandPath(f)).resolvingSymlinksInPath().path] = f }
-        let matches = open.filter {
-            byPath[URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path] != nil
-        }
+        for f in files { byPath[officeKey(f)] = f }
+        let matches = open.filter { byPath[officeKey($0.path)] != nil }
         guard !matches.isEmpty else { return }
         Log.write("  [0s] asking Office to close: \(matches.map(\.name))")
         Office.close(matches)
         for doc in matches {
-            if let f = byPath[URL(fileURLWithPath: doc.path).resolvingSymlinksInPath().path] {
+            if let f = byPath[officeKey(doc.path)] {
                 seen.pressed.insert(f)
                 seen.paths.insert(f)
             }
         }
+    }
+
+    /// One way of writing a document's location, for comparing a project's file with what
+    /// Office reports: the real path of a file on this Mac, or for an online document its web
+    /// address with any %20-style escapes undone and case ignored.
+    private static func officeKey(_ path: String) -> String {
+        if path.contains("://") {
+            return (path.removingPercentEncoding ?? path).precomposedStringWithCanonicalMapping.lowercased()
+        }
+        return URL(fileURLWithPath: expandPath(path)).resolvingSymlinksInPath().path
     }
 
     /// Asks scriptable apps (Preview, TextEdit and most of Apple's apps) to close the project's
@@ -1159,13 +1167,9 @@ enum WindowCloser {
     /// Office can keep listing a OneDrive file while it uploads, and closing it again
     /// brings the window back blank.
     private static func closeOfficeLeftovers(_ files: [String], skipping seen: Set<String>, open: [Office.OpenDocument]) {
-        let wanted = Set(files.filter { !seen.contains($0) }.map {
-            URL(fileURLWithPath: expandPath($0)).resolvingSymlinksInPath().path
-        })
+        let wanted = Set(files.filter { !seen.contains($0) }.map(officeKey))
         Log.write("  [office] open in Office: \(open.map(\.name)); already handled: \(seen.map { ($0 as NSString).lastPathComponent })")
-        let leftovers = open.filter {
-            wanted.contains(URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path)
-        }
+        let leftovers = open.filter { wanted.contains(officeKey($0.path)) }
         if !leftovers.isEmpty {
             Log.write("  [office] closing via AppleScript: \(leftovers.map(\.name))")
             Office.close(leftovers)
