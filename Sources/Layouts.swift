@@ -188,6 +188,18 @@ enum ScreenSetup {
         UserDefaults.standard.set(names, forKey: namesKey)
     }
 
+    /// Drops a setup's name and where its screens were.
+    static func forget(_ key: String) {
+        var names = UserDefaults.standard.dictionary(forKey: namesKey) as? [String: String] ?? [:]
+        names[key] = nil
+        UserDefaults.standard.set(names, forKey: namesKey)
+        if let data = UserDefaults.standard.data(forKey: geometryKey),
+           var all = try? JSONDecoder().decode([String: [Screen]].self, from: data) {
+            all[key] = nil
+            if let data = try? JSONEncoder().encode(all) { UserDefaults.standard.set(data, forKey: geometryKey) }
+        }
+    }
+
     /// Its name, or a description if it hasn't got one.
     static func label(_ key: String) -> String {
         name(key) ?? (key.contains(" + ") ? "\(key.components(separatedBy: " + ").count) screens" : "Single screen")

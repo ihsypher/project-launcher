@@ -386,9 +386,17 @@ struct SettingsView: View {
                             get: { screenNames[key] ?? ScreenSetup.name(key) ?? "" },
                             set: { screenNames[key] = $0; ScreenSetup.setName($0, for: key) }
                         ), prompt: Text(ScreenSetup.label(key))) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(key == ScreenSetup.activeKey() ? "Connected now" : "Screen setup")
-                                Text(key).font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Button {
+                                    deleteScreenSetup(key)
+                                } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                                .help("Delete this screen setup and its window layouts")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(key == ScreenSetup.activeKey() ? "Connected now" : "Screen setup")
+                                    Text(key).font(.caption).foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
@@ -484,6 +492,19 @@ struct SettingsView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         store.restoreBackup(from: url)
         backupStatus = Backups.lastBackupText()
+    }
+
+    /// Removes a screen setup: its name, and its window layout from every project.
+    private func deleteScreenSetup(_ key: String) {
+        let count = store.projects.filter { $0.layouts[key] != nil }.count
+        let what = count == 0 ? "No projects have a layout for it."
+            : "This removes its saved window positions from \(count) project\(count == 1 ? "" : "s")."
+        guard Alerts.confirm("Delete \(ScreenSetup.label(key))?", what, ok: "Delete") else { return }
+        var copy = store.projects
+        for i in copy.indices { copy[i].layouts[key] = nil }
+        store.projects = copy
+        ScreenSetup.forget(key)
+        screenNames[key] = nil
     }
 }
 
