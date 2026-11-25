@@ -557,13 +557,17 @@ final class ProjectStore: ObservableObject {
                         "Open the files, apps, Brave window and Claude chat you want first, then try again. Project Launcher also needs Accessibility permission (System Settings > Privacy & Security > Accessibility) to see your open windows.")
             return
         }
-        if !apps.isEmpty {
-            guard let chosen = Alerts.confirm(
-                "Which apps are part of this project?",
-                "Ticked apps open with the project, and their window minimises when it closes. Your documents, Brave window and Claude chat are added too.",
-                ok: "Create Project", apps: apps) else { return }
-            p.files.append(contentsOf: chosen)
-            p.minimiseAppsOnClose.append(contentsOf: chosen)
+        guard let choice = Alerts.newProject(suggestedName: p.name, groups: groups, apps: apps) else { return }
+        p.name = choice.name
+        p.files.append(contentsOf: choice.apps)
+        p.minimiseAppsOnClose.append(contentsOf: choice.apps)
+        switch choice.group {
+        case .none: break
+        case .existing(let id): p.groupID = id
+        case .new(let name):
+            let g = ProjectGroup(name: name)
+            groups.append(g)
+            p.groupID = g.id
         }
         let frames = Layouts.capture(p)
         if !frames.isEmpty {

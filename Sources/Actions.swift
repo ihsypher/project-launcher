@@ -1430,6 +1430,97 @@ enum Alerts {
         return zip(apps, boxes).filter { $0.1.state == .on }.map(\.0)
     }
 
+    /// What's chosen for a project made from open windows.
+    struct NewProjectChoice {
+        enum Group { case none, existing(UUID), new(String) }
+        var name: String
+        var group: Group
+        var apps: [String]
+    }
+
+    /// Asks for a new project's name and group (none, an existing one, or a new one) and,
+    /// if any apps are open, which of them are part of it. nil if cancelled.
+    static func newProject(suggestedName: String, groups: [ProjectGroup], apps: [String]) -> NewProjectChoice? {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "New Project from Open Windows"
+        alert.informativeText = apps.isEmpty
+            ? "Your documents, Brave window and Claude chat are added, with where their windows are."
+            : "Your documents, Brave window and Claude chat are added, with where their windows are. Ticked apps open with the project, and their window minimises when it closes."
+        alert.addButton(withTitle: "Create Project")
+        alert.addButton(withTitle: "Cancel")
+
+        let width: CGFloat = 300
+        let nameField = NSTextField(string: suggestedName)
+        nameField.placeholderString = "Project name"
+
+        let groupMenu = NSPopUpButton(frame: .zero, pullsDown: false)
+        groupMenu.addItem(withTitle: "No Group")
+        for g in groups { groupMenu.addItem(withTitle: g.name) }
+        groupMenu.menu?.addItem(.separator())
+        groupMenu.addItem(withTitle: "New Group…")
+        let newGroupIndex = groupMenu.numberOfItems - 1
+
+        let newGroupField = NSTextField(string: "")
+        newGroupField.placeholderString = "New group name"
+        newGroupField.isEnabled = false
+
+        final class Toggle: NSObject {
+            let run: () -> Void
+            init(_ run: @escaping () -> Void) { self.run = run }
+            @objc func fire() { run() }
+        }
+        let toggle = Toggle { [weak groupMenu, weak newGroupField, weak alert] in
+            guard let groupMenu, let newGroupField else { return }
+            newGroupField.isEnabled = groupMenu.indexOfSelectedItem == newGroupIndex
+            if newGroupField.isEnabled { alert?.window.makeFirstResponder(newGroupField) }
+        }
+        groupMenu.target = toggle
+        groupMenu.action = #selector(Toggle.fire)
+
+        func label(_ text: String) -> NSTextField {
+            let l = NSTextField(labelWithString: text)
+            l.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+            l.textColor = .secondaryLabelColor
+            return l
+        }
+        var views: [NSView] = [label("Name"), nameField, label("Group"), groupMenu, newGroupField]
+        let boxes = apps.map { path -> NSButton in
+            let id = Bundle(url: URL(fileURLWithPath: expandPath(path)))?.bundleIdentifier ?? ""
+            let box = NSButton(checkboxWithTitle: appDisplayName(id), target: nil, action: nil)
+            box.state = Capture.everydayApps.contains(id) ? .off : .on
+            return box
+        }
+        if !boxes.isEmpty { views += [label("Apps in this project")] + boxes }
+
+        let stack = NSStackView(views: views)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        for v in [nameField, groupMenu, newGroupField] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            v.widthAnchor.constraint(equalToConstant: width).isActive = true
+        }
+        stack.frame = NSRect(origin: .zero, size: NSSize(width: width, height: stack.fittingSize.height))
+        alert.accessoryView = stack
+        alert.window.initialFirstResponder = nameField
+
+        let response = withExtendedLifetime(toggle) { alert.runModal() }
+        guard response == .alertFirstButtonReturn else { return nil }
+
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        var group = NewProjectChoice.Group.none
+        let index = groupMenu.indexOfSelectedItem
+        if index == newGroupIndex {
+            let groupName = newGroupField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !groupName.isEmpty { group = .new(groupName) }
+        } else if index >= 1 && index <= groups.count {
+            group = .existing(groups[index - 1].id)
+        }
+        return NewProjectChoice(name: name.isEmpty ? suggestedName : name, group: group,
+                                apps: zip(apps, boxes).filter { $0.1.state == .on }.map(\.0))
+    }
+
     static func show(_ title: String, _ message: String) {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
