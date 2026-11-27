@@ -547,8 +547,12 @@ enum Capture {
             for app in NSWorkspace.shared.runningApplications
             where app.activationPolicy == .regular && !app.isHidden {
                 guard let id = app.bundleIdentifier, !skip.contains(id) else { continue }
+                let recent = RecentFiles.forApp(id)
+                // Everyday apps and Terminal don't show files, so their titles aren't looked up.
+                let searchable = !everydayApps.contains(id) && id != Terminal.bundleID
                 for w in AX.windows(pid: app.processIdentifier) where !AX.isMinimized(w) {
-                    if let path = AX.documentPath(w) { add(path) }
+                    if let path = AX.documentPath(w) ?? RecentFiles.match(w, in: recent)
+                        ?? (searchable ? RecentFiles.search(w, appID: id, appName: app.localizedName) : nil) { add(path) }
                 }
             }
         }
@@ -638,6 +642,117 @@ enum OneDrive {
             if let hit = candidates.first(where: { fm.fileExists(atPath: $0.path) }) { return hit.path }
         }
         return nil
+    }
+}
+
+/// Apps whose windows don't say which file they show (no AXDocument), but which keep a list of
+/// recent files: a window is matched to a recent file by its title (e.g. Bambu Studio's
+/// "A1_print_plate" is ~/Downloads/A1_print_plate.3mf).
+@MainActor
+enum RecentFiles {
+    static func forApp(_ bundleID: String) -> [String] {
+        switch bundleID {
+        case "com.bambulab.bambu-studio":
+            return jsonList(at: "~/Library/Application Support/BambuStudio/BambuStudio.conf", key: "recent_projects")
+        default:
+            return []
+        }
+    }
+
+    /// The recent file whose name, with or without its extension, is the window's title.
+    static func match(_ window: AXUIElement, in recent: [String]) -> String? {
+        guard !recent.isEmpty, var title = AX.string(window, kAXTitleAttribute)?.trimmingCharacters(in: .whitespaces),
+              !title.isEmpty else { return nil }
+        // An unsaved change shows as "*name" or "name*".
+        title = title.trimmingCharacters(in: CharacterSet(charactersIn: "* "))
+        return recent.first { path in
+            let url = URL(fileURLWithPath: path)
+            return (title == url.lastPathComponent || title == url.deletingPathExtension().lastPathComponent)
+                && FileManager.default.fileExists(atPath: path)
+        }
+    }
+
+    /// For any other app whose window doesn't say which file it shows: looks for a file named
+    /// like the window's title (or part of it, e.g. "name — App") with Spotlight, in your
+    /// home folder, that opens in this app by default. The most recently used one wins.
+    static func search(_ window: AXUIElement, appID: String, appName: String?) -> String? {
+        guard let title = AX.string(window, kAXTitleAttribute) else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        for name in titleCandidates(title, appName: appName) {
+            let q = name.replacingOccurrences(of: "\\", with: "\\\\")
+                        .replacingOccurrences(of: "\"", with: "\\\"")
+                        .replacingOccurrences(of: "*", with: "\\*")
+            let found = spotlight("kMDItemFSName == \"\(q)\" || kMDItemFSName == \"\(q).*\"", in: home)
+                .filter { path in
+                    // Not app support files, but iCloud Drive and OneDrive are fine.
+                    let inLibrary = path.hasPrefix(home + "/Library/")
+                        && !path.hasPrefix(home + "/Library/Mobile Documents/")
+                        && !path.hasPrefix(home + "/Library/CloudStorage/")
+                    return !inLibrary && !isApp(path) && opensIn(path, appID)
+                }
+            if let best = found.max(by: { lastUsed($0) < lastUsed($1) }) { return best }
+        }
+        return nil
+    }
+
+    /// The names a window title might be: all of it, then each part between separators,
+    /// without unsaved-change marks, skipping the app's own name.
+    private static func titleCandidates(_ title: String, appName: String?) -> [String] {
+        func clean(_ s: String) -> String {
+            var t = s.trimmingCharacters(in: .whitespaces)
+            for suffix in [" (Edited)", " - Edited", " — Edited", " [Read-Only]"] where t.hasSuffix(suffix) {
+                t = String(t.dropLast(suffix.count))
+            }
+            return t.trimmingCharacters(in: CharacterSet(charactersIn: "*• ").union(.whitespaces))
+        }
+        var parts = [clean(title)]
+        for sep in [" — ", " – ", " - ", " | ", " : "] where title.contains(sep) {
+            parts += title.components(separatedBy: sep).map(clean)
+        }
+        let app = appName?.lowercased()
+        var seen = Set<String>()
+        return parts.filter { $0.count >= 3 && $0.lowercased() != app && $0.lowercased() != "untitled" && seen.insert($0).inserted }
+    }
+
+    private static func opensIn(_ path: String, _ appID: String) -> Bool {
+        var isFolder: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isFolder) else { return false }
+        if isFolder.boolValue && !NSWorkspace.shared.isFilePackage(atPath: path) { return false }
+        return NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: path))
+            .flatMap { Bundle(url: $0)?.bundleIdentifier } == appID
+    }
+
+    private static func lastUsed(_ path: String) -> Date {
+        let v = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.contentAccessDateKey, .contentModificationDateKey])
+        return max(v?.contentAccessDate ?? .distantPast, v?.contentModificationDate ?? .distantPast)
+    }
+
+    /// Paths Spotlight finds for a query, giving up after 2 seconds.
+    private static func spotlight(_ query: String, in folder: String) -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
+        process.arguments = ["-onlyin", folder, query]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return [] }
+        let timer = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: timer)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        timer.cancel()
+        return (String(data: data, encoding: .utf8) ?? "").split(separator: "\n").map(String.init).prefix(50).map { $0 }
+    }
+
+    /// The values of a JSON object inside a settings file, newest (lowest key) first.
+    /// Bambu Studio puts a comment line before the JSON, so reading starts at the first "{".
+    private static func jsonList(at path: String, key: String) -> [String] {
+        guard let text = try? String(contentsOfFile: expandPath(path), encoding: .utf8),
+              let start = text.firstIndex(of: "{"),
+              let data = String(text[start...]).data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let list = json[key] as? [String: String] else { return [] }
+        return list.sorted { $0.key < $1.key }.map(\.value)
     }
 }
 
